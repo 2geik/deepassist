@@ -10,9 +10,12 @@ import android.provider.Settings
 import com.deepassist.data.ToolProperty
 import com.deepassist.data.ToolResult
 import com.deepassist.util.DeviceUtils
+import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.util.Calendar
+import java.util.Locale
 
 class PhoneActionTool : Tool() {
 
@@ -47,6 +50,13 @@ class PhoneActionTool : Tool() {
         "minute" to ToolProperty(
             type = "string",
             description = "Alarm dakikası (set_alarm için, 0-59)"
+        ),
+        "days" to ToolProperty(
+            type = "array",
+            description = "Alarmın tekrarlanacağı günler (set_alarm için). Boş bırakılırsa tek seferlik alarm kurulur. " +
+                "Geçerli değerler: \"pazartesi\", \"salı\", \"çarşamba\", \"perşembe\", \"cuma\", \"cumartesi\", \"pazar\". " +
+                "\"her gün\" için tüm günleri gönder.",
+            items = ToolProperty(type = "string", description = "Gün adı")
         ),
         "message" to ToolProperty(
             type = "string",
@@ -216,17 +226,49 @@ class PhoneActionTool : Tool() {
             ?: return ToolResult(false, "", error = "Dakika değeri geçersiz: $minuteStr")
 
         val message = args.optString("message")?.trim()
+        val days = parseDays(args.get("days")?.takeIf { it.isJsonArray }?.asJsonArray)
 
         val intent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
             putExtra(AlarmClock.EXTRA_HOUR, hour)
             putExtra(AlarmClock.EXTRA_MINUTES, minute)
             putExtra(AlarmClock.EXTRA_MESSAGE, message ?: "")
+            if (days != null) putIntegerArrayListExtra(AlarmClock.EXTRA_DAYS, days)
             putExtra(AlarmClock.EXTRA_SKIP_UI, true)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         context.startActivity(intent)
         val formatted = "${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}"
-        return ToolResult(true, "Alarm $formatted için kuruldu.")
+        val daysSuffix = if (days != null) " (tekrarlı)" else ""
+        return ToolResult(true, "Alarm $formatted için kuruldu$daysSuffix.")
+    }
+
+    private val dayNameToCalendar = mapOf(
+        "pazartesi" to Calendar.MONDAY,
+        "salı" to Calendar.TUESDAY,
+        "çarşamba" to Calendar.WEDNESDAY,
+        "perşembe" to Calendar.THURSDAY,
+        "cuma" to Calendar.FRIDAY,
+        "cumartesi" to Calendar.SATURDAY,
+        "pazar" to Calendar.SUNDAY
+    )
+
+    /** Turkish day names → Calendar constants for EXTRA_DAYS; null means a one-shot alarm. */
+    private fun parseDays(daysArray: JsonArray?): ArrayList<Int>? {
+        if (daysArray == null || daysArray.size() == 0) return null
+        val result = ArrayList<Int>()
+        for (elem in daysArray) {
+            val dayName = runCatching { elem.asString }.getOrNull()
+                ?.lowercase(Locale.ROOT)?.trim() ?: continue
+            if (dayName == "her gün" || dayName == "hergun") {
+                return arrayListOf(
+                    Calendar.MONDAY, Calendar.TUESDAY, Calendar.WEDNESDAY, Calendar.THURSDAY,
+                    Calendar.FRIDAY, Calendar.SATURDAY, Calendar.SUNDAY
+                )
+            }
+            val calDay = dayNameToCalendar[dayName] ?: continue
+            if (calDay !in result) result.add(calDay)
+        }
+        return result.ifEmpty { null }
     }
 
     // ----------------------------------------------------------------

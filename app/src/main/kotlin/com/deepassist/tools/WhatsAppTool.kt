@@ -3,53 +3,89 @@ package com.deepassist.tools
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
+import android.util.Log
 import com.deepassist.data.ToolProperty
 import com.deepassist.data.ToolResult
+import com.deepassist.service.AccessibilitySvc
+import com.deepassist.util.DeviceUtils
 import com.google.gson.JsonObject
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class WhatsAppTool : Tool() {
 
     override val name = "send_whatsapp"
     override val description =
-        "WhatsApp'ı verilen numarayla, mesaj önceden yazılmış şekilde açar. " +
-            "Numara ülke koduyla birlikte olmalıdır (örn. 90 ile başlayan Türkiye numarası). " +
-            "Kullanıcının göndermek için onaylaması gerekir."
+        "WhatsApp ile mesaj gönderir. SADECE kullanıcı onayladıktan sonra confirmed=true ile çağır."
     override val parameters = mapOf(
+        "contact_name" to ToolProperty(
+            type = "string",
+            description = "Rehberdeki kişinin adını AYNEN yaz, numarayı değil."
+        ),
         "phone_number" to ToolProperty(
             type = "string",
-            description = "Ülke kodu dahil telefon numarası (örn. 905551234567)"
+            description = "Telefon numarası (sadece contact_name yoksa)"
         ),
         "message" to ToolProperty(
             type = "string",
-            description = "Önceden doldurulacak mesaj içeriği"
+            description = "Gönderilecek mesaj içeriği"
+        ),
+        "confirmed" to ToolProperty(
+            type = "boolean",
+            description = "Kullanıcı onayladıysa true yap. Onaysız çağrıda gönderme yapmaz, sadece onay metni döner."
         )
     )
-    override val required = listOf("phone_number", "message")
-    override val thinkingPhrase: String? = "WhatsApp'tan mesaj atıyorum..."
+    override val required = listOf("message")
 
     // Opens the WhatsApp UI over everything — announce fully first
     override val waitForSpeech = true
 
-    override suspend fun execute(args: JsonObject): ToolResult {
-        val rawNumber = args.optString("phone_number")?.trim()
+    override fun dynamicThinkingPhrase(args: JsonObject): String? =
+        if (isConfirmed(args)) "WhatsApp'tan mesaj gönderiyorum..." else "WhatsApp mesajı hazırlanıyor..."
+
+    override suspend fun execute(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
         val message = args.optString("message")
-        if (rawNumber.isNullOrBlank() || message.isNullOrBlank()) {
-            return ToolResult(false, "", error = "Numara veya mesaj içeriği eksik.")
+        if (message.isNullOrBlank()) {
+            return@withContext ToolResult(false, "", error = "Mesaj içeriği eksik.")
+        }
+        val contactName = args.optString("contact_name")?.trim()?.takeIf { it.isNotBlank() }
+        val rawNumber = args.optString("phone_number")?.trim()?.takeIf { it.isNotBlank() }
+
+        // Resolve by name here so the model never has to relay digits.
+        var resolvedName = contactName
+        var resolvedNumber = rawNumber
+        if (contactName != null) {
+            val best = ContactLookup.search(context, contactName).firstOrNull()
+            if (best != null) {
+                resolvedName = best.name
+                resolvedNumber = best.phoneNumber
+                Log.d(TAG, "Contact '$contactName' -> '${best.name}'")
+            } else {
+                Log.w(TAG, "Contact '$contactName' not found")
+            }
+        }
+        if (resolvedNumber.isNullOrBlank()) {
+            return@withContext ToolResult(false, "", error = "Numara bulunamadı. Kişi adı veya numara belirtin.")
         }
 
-        var number = rawNumber.filter(Char::isDigit)
-        // Local Turkish numbers (05xx... / 5xx...) need the country code for wa.me
-        if (number.startsWith("0") && number.length == 11) number = "9" + number
-        else if (number.startsWith("5") && number.length == 10) number = "90$number"
+        // Never send on the model's own initiative — it must relay the user's yes.
+        if (!isConfirmed(args)) {
+            return@withContext ToolResult(
+                false, "",
+                error = "Önce kullanıcıya sorup onay almalısın. ask_user ile onay aldıktan sonra confirmed=true ile tekrar çağır."
+            )
+        }
 
+        val number = DeviceUtils.toInternationalPhoneNumber(resolvedNumber)
+        val who = resolvedName ?: number
         val encoded = Uri.encode(message)
         val direct = Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/$number?text=$encoded")).apply {
             setPackage("com.whatsapp")
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
-        return try {
+        try {
             context.startActivity(direct)
-            ToolResult(true, "WhatsApp açıldı, mesaj yazıldı. Kullanıcının gönder tuşuna basması gerekiyor.")
+            sentResult(who, autoSend())
         } catch (e: ActivityNotFoundException) {
             try {
                 val fallback = Intent(
@@ -57,12 +93,43 @@ class WhatsAppTool : Tool() {
                     Uri.parse("https://api.whatsapp.com/send?phone=$number&text=$encoded")
                 ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
                 context.startActivity(fallback)
-                ToolResult(true, "WhatsApp web bağlantısı açıldı, mesaj hazır.")
+                sentResult(who, autoSend())
             } catch (e2: Exception) {
                 ToolResult(false, "", error = "WhatsApp açılamadı. Uygulama yüklü olmayabilir.")
             }
         } catch (e: Exception) {
             ToolResult(false, "", error = "WhatsApp açılamadı: ${e.message}")
         }
+    }
+
+    /** Taps the send button through the accessibility service, then backs out of the chat. */
+    private fun autoSend(): Boolean {
+        val sent = AccessibilitySvc.clickByLabel("Gönder", 5_000L) ||
+            AccessibilitySvc.clickByLabel("Send", 2_000L)
+        if (sent) {
+            Thread.sleep(300)
+            AccessibilitySvc.pressBack()
+        }
+        Log.d(TAG, "Auto-send=$sent")
+        return sent
+    }
+
+    // A blind user can't see an unsent draft, so never claim "sent" unless the tap happened.
+    private fun sentResult(who: String, sent: Boolean): ToolResult =
+        if (sent) {
+            ToolResult(true, "$who kişisine mesaj gönderildi.")
+        } else {
+            ToolResult(
+                false, "",
+                error = "WhatsApp açıldı ve mesaj yazıldı ama Gönder tuşuna basılamadı. " +
+                    "Erişilebilirlik servisi kapalı olabilir; mesaj henüz GÖNDERİLMEDİ."
+            )
+        }
+
+    private fun isConfirmed(args: JsonObject): Boolean =
+        runCatching { args.get("confirmed")?.asBoolean == true }.getOrDefault(false)
+
+    companion object {
+        private const val TAG = "WhatsAppTool"
     }
 }

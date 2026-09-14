@@ -16,10 +16,12 @@ object PermissionsHelper {
                 Manifest.permission.RECORD_AUDIO,
                 Manifest.permission.READ_CONTACTS,
                 Manifest.permission.WRITE_CONTACTS,
+                Manifest.permission.READ_CALL_LOG,
                 Manifest.permission.CALL_PHONE,
                 Manifest.permission.READ_SMS,
                 Manifest.permission.SEND_SMS,
                 Manifest.permission.READ_PHONE_STATE,
+                Manifest.permission.CAMERA,
                 Manifest.permission.ACCESS_FINE_LOCATION,
                 Manifest.permission.ACCESS_COARSE_LOCATION
             )
@@ -41,9 +43,15 @@ object PermissionsHelper {
 
     fun hasWriteContacts(context: Context): Boolean = has(context, Manifest.permission.WRITE_CONTACTS)
 
+    fun hasCallLog(context: Context): Boolean = has(context, Manifest.permission.READ_CALL_LOG)
+
+    fun hasCamera(context: Context): Boolean = has(context, Manifest.permission.CAMERA)
+
     fun hasLocation(context: Context): Boolean =
         has(context, Manifest.permission.ACCESS_FINE_LOCATION) ||
             has(context, Manifest.permission.ACCESS_COARSE_LOCATION)
+
+    fun hasWriteSettings(context: Context): Boolean = Settings.System.canWrite(context)
 
     fun canUseFullScreenIntent(context: Context): Boolean =
         Build.VERSION.SDK_INT < 34 || runCatching {

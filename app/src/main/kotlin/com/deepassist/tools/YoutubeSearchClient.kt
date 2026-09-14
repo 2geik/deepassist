@@ -1,193 +1,170 @@
 package com.deepassist.tools
 
 import android.util.Log
-import com.google.gson.JsonElement
+import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 /**
- * Minimal YouTube InnerTube search client — the same `youtubei/v1/search`
- * endpoint youtube.com uses. Free, no user API key. The public WEB key and
- * client version are scraped from youtube.com and cached for 6 hours so key
- * rotation is picked up; hardcoded fallbacks cover scrape failures.
+ * YouTube search via the InnerTube API (`youtubei/v1/search`, WEB client).
+ * Free, no user API key. The public InnerTube key is scraped from youtube.com
+ * and cached for 6 hours so key rotation is picked up; fallback keys cover
+ * scrape failures.
  */
 object YoutubeSearchClient {
 
-    data class Video(
-        val id: String,
-        val title: String,
-        val channel: String?,
-        val duration: String?
-    )
-
-    private const val TAG = "YoutubeSearch"
-    private const val FALLBACK_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
-    private const val FALLBACK_CLIENT_VERSION = "2.20250901.00.00"
-    private const val KEY_TTL_MS = 6 * 60 * 60 * 1000L
-    private const val CACHE_TTL_MS = 30 * 60 * 1000L
-    private const val CACHE_MAX = 32
+    private const val TAG = "YTSearch"
     private const val USER_AGENT =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    private const val CLIENT_VERSION = "2.20240319.00.00"
+    private const val KEY_TTL_MS = 6 * 60 * 60 * 1000L
 
-    private val TR = Locale.forLanguageTag("tr")
-
-    /** Title markers of alternate versions, dropped unless the query asks for them. */
-    private val VARIANT_WORDS = listOf(
-        "remix", "cover", "slowed", "sped up", "speed up", "8d", "karaoke", "reverb", "nightcore"
-    )
-
+    private val gson = Gson()
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .build()
 
-    @Volatile private var apiKey: String? = null
-    @Volatile private var clientVersion: String = FALLBACK_CLIENT_VERSION
+    private val FALLBACK_KEYS = listOf(
+        "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
+        "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w",
+        "AIzaSyCzX2vSYu3gxN3iYJ8t_t7aFqUJxRsqNSM"
+    )
+
+    @Volatile private var cachedKey: String? = null
     @Volatile private var keyCachedAt = 0L
 
-    // Insertion-ordered so the oldest entry is evicted first.
-    private val cache = LinkedHashMap<String, Pair<Long, List<Video>>>()
-
-    /**
-     * Cached search so a follow-up call with `pick=N` sees the same ordering
-     * the user heard. Blocking — call from Dispatchers.IO.
-     */
-    fun searchCached(query: String, limit: Int = 10): List<Video> {
-        val key = query.trim().lowercase(TR)
-        val now = System.currentTimeMillis()
-        synchronized(cache) {
-            val hit = cache[key]
-            if (hit != null) {
-                if (now - hit.first < CACHE_TTL_MS) return hit.second
-                cache.remove(key)
-            }
-        }
-        val fresh = search(query, limit)
-        if (fresh.isNotEmpty()) {
-            synchronized(cache) {
-                cache[key] = now to fresh
-                while (cache.size > CACHE_MAX) cache.remove(cache.keys.first())
-            }
-        }
-        return fresh
+    data class YoutubeVideoResult(
+        val title: String,
+        val videoId: String,
+        val channel: String
+    ) {
+        val appUri: String get() = "vnd.youtube://$videoId"
+        val watchUrl: String get() = "https://www.youtube.com/watch?v=$videoId"
+        val musicUrl: String get() = "https://music.youtube.com/watch?v=$videoId"
     }
 
-    /** Blocking — call from Dispatchers.IO. Returns an empty list on any failure. */
-    fun search(query: String, limit: Int = 10): List<Video> {
-        val key = currentKey()
-        val body = JsonObject().apply {
-            add("context", JsonObject().apply {
-                add("client", JsonObject().apply {
-                    addProperty("clientName", "WEB")
-                    addProperty("clientVersion", clientVersion)
-                    addProperty("hl", "tr")
-                    addProperty("gl", "TR")
-                })
-            })
-            addProperty("query", query)
-            addProperty("params", "EgIQAQ==") // filter: type = video
-        }
-        val request = Request.Builder()
-            .url("https://www.youtube.com/youtubei/v1/search?key=$key&prettyPrint=false")
-            .header("User-Agent", USER_AGENT)
-            .post(body.toString().toRequestBody("application/json".toMediaType()))
-            .build()
-        return try {
-            client.newCall(request).execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    Log.w(TAG, "search HTTP ${resp.code}")
-                    if (resp.code == 400 || resp.code == 403) keyCachedAt = 0L
-                    return emptyList()
-                }
-                val text = resp.body?.string() ?: return emptyList()
-                val out = mutableListOf<Video>()
-                collectVideos(JsonParser.parseString(text), out, limit)
-                out
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "search failed: ${e.message}")
-            emptyList()
-        }
-    }
-
-    /**
-     * Drops remix/cover/slowed versions when the original is among the results
-     * (unless the query asked for one) and collapses duplicate uploads of the
-     * same title.
-     */
-    fun dedupeSmart(query: String, videos: List<Video>): List<Video> {
-        val q = query.lowercase(TR)
-        val unwanted = VARIANT_WORDS.filter { it !in q }
-        val originals = videos.filter { v ->
-            val t = v.title.lowercase(TR)
-            unwanted.none { it in t }
-        }
-        return (originals.ifEmpty { videos }).distinctBy { normalizeTitle(it.title) }
-    }
-
-    private fun normalizeTitle(title: String): String =
-        title.lowercase(TR)
-            .replace(Regex("[(\\[].*?[)\\]]"), "")
-            .replace(Regex("[^\\p{L}\\p{N}]+"), "")
-
-    private fun currentKey(): String {
-        val now = System.currentTimeMillis()
-        apiKey?.let { if (now - keyCachedAt < KEY_TTL_MS) return it }
-        try {
-            val req = Request.Builder()
-                .url("https://www.youtube.com/?hl=tr&gl=TR")
+    suspend fun search(query: String, maxResults: Int = 5): List<YoutubeVideoResult> =
+        withContext(Dispatchers.IO) {
+            val key = getApiKey()
+            val body = buildSearchRequest(query)
+                .toRequestBody("application/json; charset=utf-8".toMediaType())
+            val request = Request.Builder()
+                .url("https://www.youtube.com/youtubei/v1/search?key=$key&prettyPrint=false")
+                .header("Content-Type", "application/json; charset=utf-8")
                 .header("User-Agent", USER_AGENT)
+                .header("X-YouTube-Client-Name", "1")
+                .header("X-YouTube-Client-Version", CLIENT_VERSION)
+                .header("Accept-Language", "tr-TR,tr;q=0.9")
+                .post(body)
                 .build()
-            client.newCall(req).execute().use { resp ->
-                val html = resp.body?.string().orEmpty()
-                Regex("\"INNERTUBE_API_KEY\":\"([^\"]+)\"").find(html)?.groupValues?.get(1)?.let {
-                    apiKey = it
-                    keyCachedAt = now
+            try {
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        Log.w(TAG, "InnerTube HTTP ${response.code}")
+                        return@withContext emptyList()
+                    }
+                    val json = response.body?.string() ?: return@withContext emptyList()
+                    parseSearchResults(json, maxResults)
                 }
-                Regex("\"INNERTUBE_CLIENT_VERSION\":\"([^\"]+)\"").find(html)?.groupValues?.get(1)?.let {
-                    clientVersion = it
+            } catch (e: Exception) {
+                Log.e(TAG, "InnerTube error", e)
+                emptyList()
+            }
+        }
+
+    private fun getApiKey(): String {
+        val now = System.currentTimeMillis()
+        cachedKey?.let {
+            if (now - keyCachedAt < KEY_TTL_MS) return it
+            cachedKey = null
+        }
+        val extracted = fetchKeyFromYouTube()
+        if (extracted != null) {
+            cachedKey = extracted
+            keyCachedAt = now
+            return extracted
+        }
+        val fallback = FALLBACK_KEYS.first()
+        Log.w(TAG, "Using fallback InnerTube key")
+        cachedKey = fallback
+        keyCachedAt = now
+        return fallback
+    }
+
+    private fun fetchKeyFromYouTube(): String? = try {
+        val request = Request.Builder()
+            .url("https://www.youtube.com/")
+            .header("User-Agent", USER_AGENT)
+            .header("Accept-Language", "tr-TR,tr;q=0.9")
+            .build()
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) return null
+            val html = response.body?.string() ?: return null
+            val match = Regex("\"INNERTUBE_API_KEY\"\\s*:\\s*\"([^\"]+)\"").find(html) ?: return null
+            match.groupValues[1].takeIf { it.isNotBlank() && it.startsWith("AIza") }
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "Key fetch failed", e)
+        null
+    }
+
+    private fun buildSearchRequest(query: String): String = gson.toJson(
+        mapOf(
+            "query" to query,
+            "context" to mapOf(
+                "client" to mapOf(
+                    "hl" to "tr",
+                    "gl" to "TR",
+                    "clientName" to "WEB",
+                    "clientVersion" to CLIENT_VERSION,
+                    "utcOffsetMinutes" to 180
+                )
+            )
+        )
+    )
+
+    private fun parseSearchResults(json: String, maxResults: Int): List<YoutubeVideoResult> {
+        val results = mutableListOf<YoutubeVideoResult>()
+        try {
+            val sections = JsonParser.parseString(json).asJsonObject
+                .getAsJsonObject("contents")
+                ?.getAsJsonObject("twoColumnSearchResultsRenderer")
+                ?.getAsJsonObject("primaryContents")
+                ?.getAsJsonObject("sectionListRenderer")
+                ?.getAsJsonArray("contents")
+                ?: return emptyList()
+
+            for (section in sections) {
+                val items = section.asJsonObject
+                    .getAsJsonObject("itemSectionRenderer")
+                    ?.getAsJsonArray("contents")
+                    ?: continue
+                for (item in items) {
+                    val video = item.asJsonObject.getAsJsonObject("videoRenderer") ?: continue
+                    val videoId = video.get("videoId")?.asString ?: continue
+                    val title = firstRunText(video.getAsJsonObject("title")) ?: continue
+                    val channel = firstRunText(video.getAsJsonObject("ownerText")) ?: ""
+                    results.add(YoutubeVideoResult(title, videoId, channel))
+                    if (results.size >= maxResults) return results
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "key scrape failed: ${e.message}")
+            Log.w(TAG, "Parse error", e)
         }
-        return apiKey ?: FALLBACK_KEY
+        return results
     }
 
-    private fun collectVideos(el: JsonElement, out: MutableList<Video>, limit: Int) {
-        if (out.size >= limit) return
-        when {
-            el.isJsonObject -> {
-                val obj = el.asJsonObject
-                val renderer = obj.get("videoRenderer")
-                if (renderer != null && renderer.isJsonObject) {
-                    parseVideo(renderer.asJsonObject)?.let { out.add(it) }
-                    return
-                }
-                for ((_, child) in obj.entrySet()) collectVideos(child, out, limit)
-            }
-            el.isJsonArray -> for (child in el.asJsonArray) collectVideos(child, out, limit)
-        }
-    }
-
-    private fun parseVideo(vr: JsonObject): Video? {
-        val id = vr.get("videoId")?.asString ?: return null
-        val title = text(vr.get("title")) ?: return null
-        return Video(id, title, text(vr.get("ownerText")), text(vr.get("lengthText")))
-    }
-
-    private fun text(el: JsonElement?): String? {
-        if (el == null || !el.isJsonObject) return null
-        val obj = el.asJsonObject
-        obj.get("simpleText")?.let { return it.asString }
-        val runs = obj.get("runs")?.takeIf { it.isJsonArray }?.asJsonArray ?: return null
-        return runs.joinToString("") { it.asJsonObject.get("text")?.asString.orEmpty() }.ifBlank { null }
-    }
+    private fun firstRunText(obj: JsonObject?): String? =
+        obj?.getAsJsonArray("runs")
+            ?.takeIf { it.size() > 0 }
+            ?.get(0)?.asJsonObject
+            ?.get("text")?.asString
 }

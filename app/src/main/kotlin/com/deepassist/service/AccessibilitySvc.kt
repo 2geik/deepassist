@@ -160,5 +160,76 @@ class AccessibilitySvc : AccessibilityService() {
 
         @Volatile
         var onPowerKeyDetected: (() -> Unit)? = null
+
+        /**
+         * Polls the active window until a clickable node whose text or content
+         * description contains [label] (or WhatsApp's send button) is found and
+         * clicked. Blocking — call off the main thread.
+         */
+        @Suppress("DEPRECATION")
+        fun clickByLabel(label: String, timeoutMs: Long = 4_000L): Boolean {
+            val svc = instance ?: return false
+            val deadline = SystemClock.elapsedRealtime() + timeoutMs
+            while (SystemClock.elapsedRealtime() < deadline) {
+                val root = svc.rootInActiveWindow
+                if (root == null) {
+                    Thread.sleep(150)
+                    continue
+                }
+                val found = findClickableByLabel(root, label)
+                    ?: findClickableByViewId(root, "com.whatsapp:id/send")
+                root.recycle()
+                if (found != null) {
+                    val ok = found.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK)
+                    found.recycle()
+                    if (ok) return true
+                }
+                Thread.sleep(150)
+            }
+            return false
+        }
+
+        fun pressBack(): Boolean =
+            instance?.performGlobalAction(GLOBAL_ACTION_BACK) ?: false
+
+        @Suppress("DEPRECATION")
+        private fun findClickableByLabel(
+            node: android.view.accessibility.AccessibilityNodeInfo,
+            label: String
+        ): android.view.accessibility.AccessibilityNodeInfo? {
+            val lower = label.lowercase(java.util.Locale.ROOT)
+            val desc = node.contentDescription?.toString()?.lowercase(java.util.Locale.ROOT)
+            if (desc != null && desc.contains(lower) && node.isClickable) {
+                return android.view.accessibility.AccessibilityNodeInfo.obtain(node)
+            }
+            val text = node.text?.toString()?.lowercase(java.util.Locale.ROOT)
+            if (text != null && text.contains(lower) && node.isClickable) {
+                return android.view.accessibility.AccessibilityNodeInfo.obtain(node)
+            }
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                val found = findClickableByLabel(child, label)
+                child.recycle()
+                if (found != null) return found
+            }
+            return null
+        }
+
+        @Suppress("DEPRECATION")
+        private fun findClickableByViewId(
+            node: android.view.accessibility.AccessibilityNodeInfo,
+            viewId: String
+        ): android.view.accessibility.AccessibilityNodeInfo? {
+            if (node.viewIdResourceName == viewId && node.isClickable) {
+                return android.view.accessibility.AccessibilityNodeInfo.obtain(node)
+            }
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                val found = findClickableByViewId(child, viewId)
+                child.recycle()
+                if (found != null) return found
+            }
+            return null
+        }
     }
 }

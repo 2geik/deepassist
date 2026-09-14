@@ -13,7 +13,7 @@ object ContactLookup {
 
     /**
      * Searches contacts by name. Returns deduplicated results (by normalized
-     * phone number), max 10 entries, sorted alphabetically Turkish locale.
+     * phone number), max 10 entries, most relevant to the query first.
      */
     fun search(context: Context, rawQuery: String): List<ContactInfo> {
         if (!PermissionsHelper.hasContacts(context)) return emptyList()
@@ -55,8 +55,26 @@ object ContactLookup {
         }
 
         return bestByNumber.values.toList()
-            .sortedBy { it.name.lowercase(turkish) }
+            .sortedByDescending { scoreRelevance(it.name, stems) }
             .take(10)
+    }
+
+    /**
+     * Matches on earlier (less-trimmed) stems score higher, as do stems that
+     * cover more of the name.
+     */
+    private fun scoreRelevance(name: String, stems: List<String>): Float {
+        val ascii = DeviceUtils.toAsciiTurkce(name)
+        var best = 0f
+        stems.forEachIndexed { i, stem ->
+            if (ascii.contains(stem)) {
+                val stemBonus = 1f - i * 0.25f
+                val lengthBonus = stem.length.toFloat() / ascii.length
+                val score = 0.6f * stemBonus + 0.4f * lengthBonus
+                if (score > best) best = score
+            }
+        }
+        return best
     }
 
     private fun queryContacts(context: Context, selection: String?): List<ContactInfo> {

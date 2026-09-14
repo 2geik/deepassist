@@ -35,6 +35,11 @@ class MainActivity : ComponentActivity() {
             AssistantForegroundService.start(this)
         }
 
+    private val callLogPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+            refreshTick.intValue++
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         secureStore = SecureStore(this)
@@ -62,6 +67,9 @@ class MainActivity : ComponentActivity() {
                         refreshTick = refreshTick.intValue,
                         onRequestRuntimePermissions = {
                             permissionLauncher.launch(PermissionsHelper.runtimePermissions)
+                        },
+                        onRequestCallLogPermission = {
+                            callLogPermissionLauncher.launch(android.Manifest.permission.READ_CALL_LOG)
                         }
                     )
                     is Screen.Memory -> MemoryScreen(

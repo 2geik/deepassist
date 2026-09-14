@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.telecom.TelecomManager
 import com.deepassist.data.ToolProperty
 import com.deepassist.data.ToolResult
+import com.deepassist.util.DeviceUtils
 import com.deepassist.util.PermissionsHelper
 import com.google.gson.JsonObject
 
@@ -13,7 +14,8 @@ class PhoneCallTool : Tool() {
 
     override val name = "make_phone_call"
     override val description =
-        "Verilen telefon numarasını hemen arar. Numara bilinmiyorsa önce search_contacts ile bulunmalıdır."
+        "Telefonla arama yapar. SADECE kullanıcı onayladıktan sonra confirmed=true ile çağır. " +
+            "Numara bilinmiyorsa önce search_contacts ile bulunmalıdır."
     override val parameters = mapOf(
         "phone_number" to ToolProperty(
             type = "string",
@@ -22,6 +24,10 @@ class PhoneCallTool : Tool() {
         "contact_name" to ToolProperty(
             type = "string",
             description = "Aranan kişinin adı (isteğe bağlı, sesli geri bildirim için)"
+        ),
+        "confirmed" to ToolProperty(
+            type = "boolean",
+            description = "Kullanıcı onayladıysa true yap. Onaysız çağrıda arama yapmaz, sadece onay metni döner."
         )
     )
     override val required = listOf("phone_number")
@@ -33,6 +39,7 @@ class PhoneCallTool : Tool() {
     override val waitForSpeech = true
 
     override fun dynamicThinkingPhrase(args: JsonObject): String? {
+        if (!isConfirmed(args)) return "Arama onayı bekleniyor..."
         val contactName = args.optString("contact_name")?.trim()
         return if (contactName.isNullOrBlank()) "Arıyorum..." else "$contactName'i arıyorum..."
     }
@@ -41,12 +48,23 @@ class PhoneCallTool : Tool() {
         if (!PermissionsHelper.hasCallPhone(context)) {
             return ToolResult(false, "", error = "Telefon arama izni verilmemiş.")
         }
-        val number = args.optString("phone_number")?.trim()?.replace(" ", "")
-        if (number.isNullOrBlank()) {
+        val rawNumber = args.optString("phone_number")?.trim()?.replace(" ", "")
+        if (rawNumber.isNullOrBlank()) {
             return ToolResult(false, "", error = "Telefon numarası belirtilmedi.")
         }
-        val uri = Uri.fromParts("tel", number, null)
+        val number = DeviceUtils.normalizePhoneNumber(rawNumber)
         val who = args.optString("contact_name")?.takeIf { it.isNotBlank() } ?: number
+
+        // Never dial on the model's own initiative — it must relay the user's yes.
+        if (!isConfirmed(args)) {
+            return ToolResult(
+                false, "",
+                error = "Önce kullanıcıya sorup onay almalısın. $who kişisini aramak istediğini söyleyip " +
+                    "ask_user ile onay aldıktan sonra confirmed=true ile tekrar çağır."
+            )
+        }
+
+        val uri = Uri.fromParts("tel", number, null)
 
         // ACTION_CALL via startActivity is silently dropped when launched from a
         // background service (Android 10+ activity-start restriction), so the
@@ -70,4 +88,7 @@ class PhoneCallTool : Tool() {
             ToolResult(false, "", error = "Arama başlatılamadı: ${e.message}")
         }
     }
+
+    private fun isConfirmed(args: JsonObject): Boolean =
+        runCatching { args.get("confirmed")?.asBoolean == true }.getOrDefault(false)
 }

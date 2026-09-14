@@ -43,7 +43,8 @@ import com.deepassist.util.PermissionsHelper
 fun SettingsScreen(
     secureStore: SecureStore,
     refreshTick: Int,
-    onRequestRuntimePermissions: () -> Unit
+    onRequestRuntimePermissions: () -> Unit,
+    onRequestCallLogPermission: () -> Unit
 ) {
     val context = LocalContext.current
     var openAiKey by remember { mutableStateOf(secureStore.openAiApiKey) }
@@ -51,6 +52,7 @@ fun SettingsScreen(
     var voiceEnabled by remember { mutableStateOf(secureStore.voiceResponseEnabled) }
 
     val hasRuntime = remember(refreshTick) { PermissionsHelper.hasAllRuntimePermissions(context) }
+    val hasCallLog = remember(refreshTick) { PermissionsHelper.hasCallLog(context) }
     val hasOverlay = remember(refreshTick) { PermissionsHelper.hasOverlay(context) }
     val hasAccessibility = remember(refreshTick) { PermissionsHelper.isAccessibilityEnabled(context) }
     val ignoresBattery = remember(refreshTick) { PermissionsHelper.isIgnoringBatteryOptimizations(context) }
@@ -134,6 +136,12 @@ fun SettingsScreen(
             subtitle = "Mikrofon, rehber, arama, SMS, bildirim",
             granted = hasRuntime,
             onRequest = onRequestRuntimePermissions
+        )
+        PermissionRow(
+            title = "Arama kayıtları (çağrı geçmişi)",
+            subtitle = "Gelen, giden, cevapsız aramaları okumak için",
+            granted = hasCallLog,
+            onRequest = onRequestCallLogPermission
         )
         PermissionRow(
             title = "Ekran üstü gösterim",

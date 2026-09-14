@@ -61,8 +61,21 @@ object DeviceUtils {
             digits.length == 10 && digits.startsWith("5") -> "0$digits"
             digits.length == 11 && digits.startsWith("0") -> digits
             digits.startsWith("90") && digits.length == 12 -> "0${digits.drop(2)}"
+            digits.startsWith("900") && digits.length == 13 -> "0${digits.drop(3)}"
             digits.startsWith("90") && digits.length == 13 -> "0${digits.drop(2)}"
+            digits.startsWith("0090") && digits.length == 14 -> "0${digits.drop(4)}"
+            digits.startsWith("0090") && digits.length == 15 -> "0${digits.drop(5)}"
             else -> digits // unknown format — return digits as-is
+        }
+    }
+
+    /** 0xxxxxxxxxx → [countryCode]xxxxxxxxxx, the form wa.me links expect. */
+    fun toInternationalPhoneNumber(raw: String, countryCode: String = "90"): String {
+        val normalized = normalizePhoneNumber(raw)
+        return if (normalized.startsWith("0") && normalized.length == 11) {
+            countryCode + normalized.substring(1)
+        } else {
+            normalized
         }
     }
 
