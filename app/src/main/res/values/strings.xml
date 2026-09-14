@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">deepAssist</string>
+    <string name="accessibility_service_label">deepAssist Bildirim Okuyucu</string>
+    <string name="accessibility_service_description">deepAssist\'in bildirimleri okuyabilmesi ve ekran kapama/açma ile tetiklenebilmesi için gereklidir. Bildirim içerikleri yalnızca cihazda tutulur.</string>
+</resources>
