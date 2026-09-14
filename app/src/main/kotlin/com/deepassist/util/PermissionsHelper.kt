@@ -19,7 +19,9 @@ object PermissionsHelper {
                 Manifest.permission.CALL_PHONE,
                 Manifest.permission.READ_SMS,
                 Manifest.permission.SEND_SMS,
-                Manifest.permission.READ_PHONE_STATE
+                Manifest.permission.READ_PHONE_STATE,
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION
             )
             if (Build.VERSION.SDK_INT >= 33) {
                 perms.add(Manifest.permission.POST_NOTIFICATIONS)
@@ -38,6 +40,10 @@ object PermissionsHelper {
     fun hasSendSms(context: Context): Boolean = has(context, Manifest.permission.SEND_SMS)
 
     fun hasWriteContacts(context: Context): Boolean = has(context, Manifest.permission.WRITE_CONTACTS)
+
+    fun hasLocation(context: Context): Boolean =
+        has(context, Manifest.permission.ACCESS_FINE_LOCATION) ||
+            has(context, Manifest.permission.ACCESS_COARSE_LOCATION)
 
     fun canUseFullScreenIntent(context: Context): Boolean =
         Build.VERSION.SDK_INT < 34 || runCatching {

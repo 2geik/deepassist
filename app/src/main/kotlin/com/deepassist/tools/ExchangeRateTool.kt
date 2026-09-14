@@ -36,7 +36,7 @@ class ExchangeRateTool : Tool() {
     override val thinkingPhrase: String? = "Kura bakıyorum..."
 
     companion object {
-        private val cache = mutableMapOf<String, Pair<Long, JsonObject>>()
+        private val cache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, JsonObject>>()
         private const val CACHE_TTL_MS = 10 * 60 * 1000L // 10 minutes
     }
 
