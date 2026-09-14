@@ -68,6 +68,16 @@ class WhatsAppTool : Tool() {
             return@withContext ToolResult(false, "", error = "Numara bulunamadı. Kişi adı veya numara belirtin.")
         }
 
+        // Without the accessibility service nothing can tap Send; opening WhatsApp would
+        // only strand an unsent draft on a screen the user can't see.
+        if (AccessibilitySvc.instance == null) {
+            return@withContext ToolResult(
+                false, "",
+                error = "Erişilebilirlik servisi kapalı olduğu için WhatsApp mesajını gönderemiyorum. " +
+                    "Telefon ayarlarından deepAssist erişilebilirlik servisini açman gerekiyor."
+            )
+        }
+
         // Never send on the model's own initiative — it must relay the user's yes.
         if (!isConfirmed(args)) {
             return@withContext ToolResult(

@@ -14,6 +14,7 @@ object OverlayService {
     /** Clears previous bubbles and shows the opening listening pill. */
     fun newSession(context: Context, statusText: String) {
         ChatSession.newSession(statusText)
+        SessionActivity.relaunchSuppressed = false
         SessionActivity.ensureVisible(context)
     }
 

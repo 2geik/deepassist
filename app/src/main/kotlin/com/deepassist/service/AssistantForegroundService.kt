@@ -23,8 +23,10 @@ import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.util.Log
 import com.deepassist.MainActivity
 import com.deepassist.R
+import com.deepassist.SessionActivity
 import com.deepassist.data.ChatHistoryStore
 import com.deepassist.data.ConversationManager
 import com.deepassist.data.SecureStore
@@ -49,6 +51,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CancellationException
@@ -58,6 +61,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -102,6 +106,9 @@ class AssistantForegroundService : Service() {
     @Volatile private var phraseJob: Job? = null
     private var screenOffReceiver: BroadcastReceiver? = null
     @Volatile private var hadError = false
+
+    // Bumped per trigger so a cancelled session's cleanup can't clobber its successor
+    private val sessionGeneration = AtomicInteger(0)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -167,17 +174,29 @@ class AssistantForegroundService : Service() {
     // ==================================================================
 
     private fun handleTrigger(resumeChatId: String? = null) {
-        if (pendingQuestion != null) {
+        // An open ask_user question: the trigger means "I'm answering now"
+        if (pendingQuestion != null && !listening.get()) {
+            Log.i(TAG, "trigger: answering pending question")
             serviceScope.launch { listenForPendingAnswer() }
             return
         }
-        if (!listening.compareAndSet(false, true)) {
-            vibrateBusy() // already mid-task: feel it instead of silence
-            return
+
+        // A trigger must always produce a listening assistant. The user can't see a
+        // stuck or half-finished session, so restart it instead of ignoring the gesture.
+        val previous = currentSessionJob
+        if (previous?.isActive == true || listening.get()) {
+            Log.i(TAG, "trigger while busy: restarting session")
+            endCurrentSession()
         }
+        val generation = sessionGeneration.incrementAndGet()
+        listening.set(true)
         processing.set(true)
+        uiHandedOff = false
+        Log.i(TAG, "session $generation starting")
 
         currentSessionJob = serviceScope.launch {
+            // Let the cancelled session release the microphone and TTS first
+            previous?.let { withTimeoutOrNull(PREVIOUS_SESSION_JOIN_MS) { it.join() } }
             val wakeLock = acquireWakeLock()
             try {
                 // Her tetikleme yepyeni bir sohbettir; oturum içindeki takip
@@ -246,16 +265,27 @@ class AssistantForegroundService : Service() {
                         sessionEnded = true
                         break // conversation over (farewell or error)
                     }
+                    // A tool opened another app (chat, video, dialer) that now owns the
+                    // screen and audio — don't reopen the mic or pull the panel over it
+                    if (uiHandedOff) {
+                        Log.i(TAG, "session $generation handed off to another app — closing")
+                        sessionEnded = true
+                        break
+                    }
                     // Answer done → reopen the microphone for a follow-up command
                 }
             } finally {
-                abandonAudioFocus()
-                listening.set(false)
-                processing.set(false)
-                currentChatId = null
+                // A newer session may already own the shared state — leave it alone
+                if (sessionGeneration.get() == generation) {
+                    abandonAudioFocus()
+                    listening.set(false)
+                    processing.set(false)
+                    currentChatId = null
+                    if (!hadError) updateNotification(computeStatusText())
+                    hadError = false
+                }
                 wakeLock?.let { runCatching { it.release() } }
-                if (!hadError) updateNotification(computeStatusText())
-                hadError = false
+                Log.i(TAG, "session $generation finished")
             }
         }
     }
@@ -550,10 +580,19 @@ class AssistantForegroundService : Service() {
             // announcement finish first so it isn't cut off by the dialer/SMS UI.
             if (tool.waitForSpeech) awaitPhrase()
 
+            toolInProgress = true
             results[callId] = try {
-                tool.execute(args)
+                withTimeoutOrNull(TOOL_TIMEOUT_MS) { tool.execute(args) }
+                    ?: ToolResult(false, "", error = "İşlem zaman aşımına uğradı.").also {
+                        Log.w(TAG, "tool ${fn.name} timed out")
+                    }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 ToolResult(false, "", error = e.message ?: "Araç çalıştırma hatası")
+            } finally {
+                toolInProgress = false
+                lastToolFinishedAt = SystemClock.elapsedRealtime()
             }
         }
         return results
@@ -608,8 +647,25 @@ class AssistantForegroundService : Service() {
 
     private suspend fun speak(text: String) {
         if (!secureStore.voiceResponseEnabled || text.isBlank()) return
-        val played = secureStore.hasOpenAiKey() && openAiTts.speak(text)
-        if (!played) androidTts.speak(text)
+        val budgetMs = (SPEAK_BASE_MS + text.length * SPEAK_PER_CHAR_MS).coerceAtMost(SPEAK_MAX_MS)
+        coroutineScope {
+            val timedOut = AtomicBoolean(false)
+            // A TTS engine can silently drop an utterance or stall on the network;
+            // stopping playback unblocks both engines so the session moves on.
+            val watchdog = launch {
+                delay(budgetMs)
+                timedOut.set(true)
+                Log.w(TAG, "speak watchdog fired after ${budgetMs}ms")
+                runCatching { openAiTts.stop() }
+                runCatching { androidTts.stop() }
+            }
+            try {
+                val played = secureStore.hasOpenAiKey() && openAiTts.speak(text)
+                if (!played && !timedOut.get()) androidTts.speak(text)
+            } finally {
+                watchdog.cancel()
+            }
+        }
     }
 
     private fun speakAsync(text: String) {
@@ -812,6 +868,7 @@ class AssistantForegroundService : Service() {
         if (!secureStore.hasDeepSeekKey()) missing.add("DeepSeek anahtarı")
         if (!PermissionsHelper.hasMicrophone(this)) missing.add("mikrofon izni")
         if (!PermissionsHelper.hasOverlay(this)) missing.add("ekran üstü izni")
+        if (!PermissionsHelper.isAccessibilityEnabled(this)) missing.add("erişilebilirlik servisi")
         return if (missing.isEmpty()) "Dinlemede..." else "Eksik: ${missing.joinToString(", ")}"
     }
 
@@ -882,20 +939,6 @@ class AssistantForegroundService : Service() {
         }
     }
 
-    private fun vibrateBusy() {
-        runCatching {
-            val vibrator = if (Build.VERSION.SDK_INT >= 31) {
-                (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager)
-                    .defaultVibrator
-            } else {
-                @Suppress("DEPRECATION")
-                getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-            }
-            vibrator.vibrate(VibrationEffect.createWaveform(
-                longArrayOf(0, 40, 90, 40), -1))
-        }
-    }
-
     private fun acquireWakeLock(): PowerManager.WakeLock? = runCatching {
         val pm = getSystemService(POWER_SERVICE) as PowerManager
         pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "deepassist:trigger").apply {
@@ -932,6 +975,25 @@ class AssistantForegroundService : Service() {
         const val ACTION_STOP = "com.deepassist.STOP"
         const val EXTRA_RESUME_CHAT_ID = "resume_chat_id"
 
+        private const val TAG = "AssistantFgs"
+
+        /** Leave hints this soon after a tool ran are that tool opening an app. */
+        private const val TOOL_HANDOFF_WINDOW_MS = 3_000L
+
+        @Volatile
+        var toolInProgress = false
+
+        @Volatile
+        private var lastToolFinishedAt = 0L
+
+        /** Set by SessionActivity when an app opened by a tool took over the screen. */
+        @Volatile
+        var uiHandedOff = false
+
+        /** True while a tool runs or just finished — its activity launch isn't the user leaving. */
+        fun isToolHandoff(): Boolean =
+            toolInProgress || SystemClock.elapsedRealtime() - lastToolFinishedAt < TOOL_HANDOFF_WINDOW_MS
+
         fun resumeChat(context: Context, chatId: String) {
             runCatching {
                 context.startForegroundService(
@@ -951,6 +1013,11 @@ class AssistantForegroundService : Service() {
         private const val MAX_RECORD_MS = 8_000L
         private const val SILENCE_STOP_MS = 3_000L
         private const val SILENCE_THRESHOLD = 500
+        private const val TOOL_TIMEOUT_MS = 45_000L
+        private const val PREVIOUS_SESSION_JOIN_MS = 2_000L
+        private const val SPEAK_BASE_MS = 8_000L
+        private const val SPEAK_PER_CHAR_MS = 90L
+        private const val SPEAK_MAX_MS = 300_000L
 
         /** Timestamp (elapsedRealtime) of the last screen-off-initiated session end.
          *  Used by AccessibilitySvc to avoid immediately restarting a session after
@@ -971,7 +1038,7 @@ class AssistantForegroundService : Service() {
                     Intent(context, AssistantForegroundService::class.java)
                         .apply { this.action = action }
                 )
-            }
+            }.onFailure { Log.w(TAG, "trigger $action failed", it) }
         }
 
         fun endSession(context: Context) = trigger(context, ACTION_END_SESSION)

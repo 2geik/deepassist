@@ -43,6 +43,9 @@ class SessionActivity : Activity() {
     private lateinit var scroll: CappedScrollView
     private val hideHandler = Handler(Looper.getMainLooper())
 
+    // True between onStop and onStart — the panel exists but another app covers it
+    @Volatile private var inBackground = false
+
     // Full-screen expansion
     private var expanded = false
     private lateinit var sheetView: LinearLayout
@@ -52,6 +55,7 @@ class SessionActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         instance = this
+        launchPending = false
 
         setShowWhenLocked(true)
         setTurnScreenOn(true)
@@ -71,7 +75,25 @@ class SessionActivity : Activity() {
     /** HOME press (or recents gesture) while the panel is up ends the session. */
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
+        if (AssistantForegroundService.isToolHandoff()) {
+            // A tool just opened another app (WhatsApp, YouTube, dialer...). Step aside,
+            // but let the session speak the result instead of killing it mid-action.
+            relaunchSuppressed = true
+            AssistantForegroundService.uiHandedOff = true
+            finish()
+            return
+        }
         endSessionAndFinish()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        inBackground = false
+    }
+
+    override fun onStop() {
+        super.onStop()
+        inBackground = true
     }
 
     @Deprecated("Deprecated in Java")
@@ -367,7 +389,8 @@ class SessionActivity : Activity() {
         if (instance === this) {
             instance = null
             ChatSession.setListener(null)
-            OverlayAnchor.hide()
+            // A relaunch in flight still needs the anchor for its background start
+            if (!launchPending) OverlayAnchor.hide()
         }
         super.onDestroy()
     }
@@ -393,6 +416,13 @@ class SessionActivity : Activity() {
         var instance: SessionActivity? = null
             private set
 
+        /** Set when an app opened by a tool took over; keeps updates from pulling the panel over it. */
+        @Volatile
+        var relaunchSuppressed = false
+
+        @Volatile
+        private var launchPending = false
+
         /**
          * Brings the session UI up if it is not already showing.
          *
@@ -402,8 +432,10 @@ class SessionActivity : Activity() {
          * a full-screen-intent notification launches the activity instead.
          */
         fun ensureVisible(context: Context) {
+            if (relaunchSuppressed) return
             val current = instance
-            if (current != null && !current.isFinishing) return
+            // Still on screen — nothing to do. A covered (stopped) panel is brought back.
+            if (current != null && !current.isFinishing && !current.inBackground) return
             val app = context.applicationContext
 
             val keyguard = app.getSystemService(KeyguardManager::class.java)
@@ -424,13 +456,19 @@ class SessionActivity : Activity() {
             }
 
             OverlayAnchor.show(app)
+            launchPending = true
             Handler(Looper.getMainLooper()).postDelayed({
-                if (instance != null) return@postDelayed
-                runCatching {
-                    app.startActivity(
-                        Intent(app, SessionActivity::class.java)
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    )
+                try {
+                    val now = instance
+                    if (now != null && !now.isFinishing && !now.inBackground) return@postDelayed
+                    runCatching {
+                        app.startActivity(
+                            Intent(app, SessionActivity::class.java)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    }.onFailure { android.util.Log.w("SessionActivity", "panel launch failed", it) }
+                } finally {
+                    launchPending = false
                 }
             }, ANCHOR_SETTLE_MS)
         }

@@ -8,6 +8,7 @@ import android.service.voice.VoiceInteractionSession
 import android.service.voice.VoiceInteractionSessionService
 import android.speech.RecognitionService
 import android.speech.SpeechRecognizer
+import android.util.Log
 
 /**
  * Default-assistant entry point (home button long-press / assist gesture).
@@ -30,8 +31,10 @@ class DeepAssistSession(context: Context) : VoiceInteractionSession(context) {
 
     override fun onShow(args: Bundle?, showFlags: Int) {
         super.onShow(args, showFlags)
+        Log.i("DeepAssistSession", "assist gesture → trigger")
         AssistantForegroundService.trigger(context, AssistantForegroundService.ACTION_VOICE_TRIGGER)
-        hide()
+        // finish(), not hide(): a merely hidden session lingers and may not be shown again
+        finish()
     }
 }
 

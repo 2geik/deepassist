@@ -25,6 +25,8 @@ object OverlayAnchor {
     fun show(context: Context) {
         if (!Settings.canDrawOverlays(context)) return
         val app = context.applicationContext
+        // A hide still queued from the previous panel would remove the anchor we need now
+        main.removeCallbacks(hideRunnable)
         main.post {
             if (view != null) return@post
             val wm = app.getSystemService(WindowManager::class.java) ?: return@post
@@ -47,11 +49,14 @@ object OverlayAnchor {
         }
     }
 
+    private val hideRunnable = Runnable {
+        view?.let { v -> runCatching { windowManager?.removeView(v) } }
+        view = null
+        windowManager = null
+    }
+
     fun hide() {
-        main.post {
-            view?.let { v -> runCatching { windowManager?.removeView(v) } }
-            view = null
-            windowManager = null
-        }
+        main.removeCallbacks(hideRunnable)
+        main.post(hideRunnable)
     }
 }
