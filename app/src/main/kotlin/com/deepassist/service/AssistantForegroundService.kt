@@ -29,6 +29,7 @@ import com.deepassist.R
 import com.deepassist.SessionActivity
 import com.deepassist.data.ChatHistoryStore
 import com.deepassist.data.ConversationManager
+import com.deepassist.data.MemoryExtractor
 import com.deepassist.data.SecureStore
 import com.deepassist.data.ToolCall
 import com.deepassist.data.ToolResult
@@ -85,6 +86,7 @@ class AssistantForegroundService : Service() {
     private lateinit var toolRegistry: ToolRegistry
 
     private lateinit var deepSeek: DeepSeekClient
+    private lateinit var memoryExtractor: MemoryExtractor
     private lateinit var openAiTts: OpenAiTts
     private lateinit var androidTts: AndroidTts
 
@@ -120,6 +122,7 @@ class AssistantForegroundService : Service() {
 
         conversation = ConversationManager()
         deepSeek = DeepSeekClient { secureStore.deepseekApiKey }
+        memoryExtractor = MemoryExtractor(this, deepSeek)
         openAiTts = OpenAiTts { secureStore.openAiApiKey }
         androidTts = AndroidTts(this)
         realtimeStt = RealtimeStt { secureStore.openAiApiKey }
@@ -198,6 +201,8 @@ class AssistantForegroundService : Service() {
             // Let the cancelled session release the microphone and TTS first
             previous?.let { withTimeoutOrNull(PREVIOUS_SESSION_JOIN_MS) { it.join() } }
             val wakeLock = acquireWakeLock()
+            val sessionStartedAt = System.currentTimeMillis()
+            var sessionChatId: String? = null
             try {
                 // Her tetikleme yepyeni bir sohbettir; oturum içindeki takip
                 // komutları ise bağlamı korur
@@ -254,6 +259,7 @@ class AssistantForegroundService : Service() {
                     overlayUser(text)
                     val chatId = currentChatId ?: chatHistory.create(text).id
                     currentChatId = chatId
+                    sessionChatId = chatId
                     runCatching { chatHistory.append(chatId, "user", text) }
 
                     if (isEndPhrase(text)) {
@@ -285,6 +291,13 @@ class AssistantForegroundService : Service() {
                     hadError = false
                 }
                 wakeLock?.let { runCatching { it.release() } }
+                // Learn durable facts from this session in the background, however it ended
+                sessionChatId?.let { chatId ->
+                    serviceScope.launch {
+                        runCatching { memoryExtractor.extract(chatId, sessionStartedAt) }
+                            .onFailure { Log.w(TAG, "memory extraction failed", it) }
+                    }
+                }
                 Log.i(TAG, "session $generation finished")
             }
         }
@@ -517,7 +530,7 @@ class AssistantForegroundService : Service() {
         initialReasoning: String?
     ): Boolean {
         var toolCalls = initialToolCalls
-        // deepseek-v4-flash thinks by default and answers HTTP 400 to a tool follow-up
+        // deepseek-flash thinks by default and answers HTTP 400 to a tool follow-up
         // whose tool-call message lacks the reasoning that produced it
         var reasoning = initialReasoning
         var phraseSpoken = firstPhraseSpoken

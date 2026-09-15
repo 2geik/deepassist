@@ -10,7 +10,9 @@ import java.util.concurrent.CopyOnWriteArrayList
 data class MemoryEntry(
     val id: String,
     val text: String,
-    val createdAt: Long
+    val createdAt: Long,
+    /** Last rewrite by the memory extractor; 0 = never changed. */
+    val updatedAt: Long = 0L
 )
 
 class MemoryStore private constructor(private val file: File) {
@@ -45,27 +47,45 @@ class MemoryStore private constructor(private val file: File) {
     @Synchronized
     fun add(text: String): MemoryEntry {
         ensureLoaded()
-        val trimmed = text.trim().take(300)
+        val trimmed = text.trim().take(MAX_TEXT)
         if (trimmed.isBlank()) {
             throw IllegalArgumentException("Content is blank")
         }
-        val lower = trimmed.lowercase()
-        if (entries.any { it.text.trim().lowercase() == lower }) {
-            // Duplicate — return the existing entry
-            return entries.first { it.text.trim().lowercase() == lower }
-        }
+        findSame(trimmed)?.let { return it }
         val entry = MemoryEntry(
             id = UUID.randomUUID().toString(),
             text = trimmed,
             createdAt = System.currentTimeMillis()
         )
         entries.add(entry)
-        // Cap at 200, drop oldest (first in list)
-        while (entries.size > 200) {
+        // Cap at MAX_ENTRIES, drop oldest (first in list)
+        while (entries.size > MAX_ENTRIES) {
             entries.removeAt(0)
         }
         persist()
         return entry
+    }
+
+    /** @return false when the text is blank or already stored. */
+    @Synchronized
+    fun addIfNew(text: String): Boolean {
+        ensureLoaded()
+        val trimmed = text.trim().take(MAX_TEXT)
+        if (trimmed.isBlank() || findSame(trimmed) != null) return false
+        add(trimmed)
+        return true
+    }
+
+    /** Rewrites an entry in place (merging or correcting it); false when missing or blank. */
+    @Synchronized
+    fun update(id: String, text: String): Boolean {
+        ensureLoaded()
+        val trimmed = text.trim().take(MAX_TEXT)
+        val index = entries.indexOfFirst { it.id == id }
+        if (index < 0 || trimmed.isBlank()) return false
+        entries[index] = entries[index].copy(text = trimmed, updatedAt = System.currentTimeMillis())
+        persist()
+        return true
     }
 
     @Synchronized
@@ -94,6 +114,11 @@ class MemoryStore private constructor(private val file: File) {
         loaded = true // still loaded, just empty
     }
 
+    private fun findSame(text: String): MemoryEntry? {
+        val lower = text.lowercase()
+        return entries.firstOrNull { it.text.trim().lowercase() == lower }
+    }
+
     private fun persist() {
         runCatching {
             val json = gson.toJson(entries)
@@ -105,6 +130,9 @@ class MemoryStore private constructor(private val file: File) {
     }
 
     companion object {
+        private const val MAX_ENTRIES = 200
+        private const val MAX_TEXT = 300
+
         @Volatile
         private var instance: MemoryStore? = null
 

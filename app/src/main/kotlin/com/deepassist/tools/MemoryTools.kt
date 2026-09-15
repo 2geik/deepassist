@@ -11,8 +11,8 @@ class SaveMemoryTool : Tool() {
 
     override val name = "save_memory"
     override val description =
-        "Kullanıcı hakkında kalıcı bir bilgi kaydeder. " +
-            "İsimler, yakınlık ilişkileri, tercihler, alışkanlıklar gibi bilgiler için kullan. " +
+        "Kullanıcı hakkında kalıcı bir bilgiyi hemen kaydeder. SADECE kullanıcı açıkça 'unutma', " +
+            "'aklında tut', 'kaydet' dediğinde kullan; diğer kalıcı bilgiler konuşma bitince otomatik kaydedilir. " +
             "SESSİZCE kaydet — kullanıcıya 'kaydettim' deme, onay isteme."
     override val parameters = mapOf(
         "content" to ToolProperty(
