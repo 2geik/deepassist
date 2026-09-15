@@ -49,6 +49,7 @@ fun SettingsScreen(
     val context = LocalContext.current
     var openAiKey by remember { mutableStateOf(secureStore.openAiApiKey) }
     var deepseekKey by remember { mutableStateOf(secureStore.deepseekApiKey) }
+    var tavilyKey by remember { mutableStateOf(secureStore.tavilyApiKey) }
     var voiceEnabled by remember { mutableStateOf(secureStore.voiceResponseEnabled) }
 
     val hasRuntime = remember(refreshTick) { PermissionsHelper.hasAllRuntimePermissions(context) }
@@ -91,10 +92,20 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth()
         )
         Spacer(Modifier.height(12.dp))
+        OutlinedTextField(
+            value = tavilyKey,
+            onValueChange = { tavilyKey = it },
+            label = { Text("Tavily API Anahtarı (internet araması, isteğe bağlı)") },
+            visualTransformation = PasswordVisualTransformation(),
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(Modifier.height(12.dp))
         Button(
             onClick = {
                 secureStore.openAiApiKey = openAiKey
                 secureStore.deepseekApiKey = deepseekKey
+                secureStore.tavilyApiKey = tavilyKey
                 AssistantForegroundService.start(context)
                 Toast.makeText(context, "Kaydedildi", Toast.LENGTH_SHORT).show()
             },

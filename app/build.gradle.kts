@@ -31,6 +31,10 @@ android {
             "String", "OPENAI_API_KEY",
             "\"${localProperties.getProperty("OPENAI_API_KEY", "")}\""
         )
+        buildConfigField(
+            "String", "TAVILY_API_KEY",
+            "\"${localProperties.getProperty("TAVILY_API_KEY", "")}\""
+        )
     }
 
     buildTypes {
