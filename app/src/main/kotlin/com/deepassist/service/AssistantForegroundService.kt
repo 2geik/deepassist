@@ -862,6 +862,7 @@ class AssistantForegroundService : Service() {
     }
 
     private fun notifyStartupStatus() {
+        MessageListenerService.rebindIfNeeded(this)
         startForegroundCompat(buildNotification(computeStatusText()))
     }
 
@@ -872,6 +873,7 @@ class AssistantForegroundService : Service() {
         if (!PermissionsHelper.hasMicrophone(this)) missing.add("mikrofon izni")
         if (!PermissionsHelper.hasOverlay(this)) missing.add("ekran üstü izni")
         if (!PermissionsHelper.isAccessibilityEnabled(this)) missing.add("erişilebilirlik servisi")
+        if (!PermissionsHelper.isNotificationListenerEnabled(this)) missing.add("bildirim erişimi")
         return if (missing.isEmpty()) "Dinlemede..." else "Eksik: ${missing.joinToString(", ")}"
     }
 

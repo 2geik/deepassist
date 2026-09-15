@@ -63,6 +63,8 @@ class AccessibilitySvc : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null || event.eventType != AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED) return
+        // The notification listener already captures the full text; this is the fallback
+        if (MessageListenerService.instance != null) return
         val pkg = event.packageName?.toString() ?: return
         if (pkg == packageName) return // ignore our own foreground-service notification
 

@@ -72,6 +72,10 @@ object PermissionsHelper {
         return enabled.contains(context.packageName)
     }
 
+    fun isNotificationListenerEnabled(context: Context): Boolean =
+        androidx.core.app.NotificationManagerCompat.getEnabledListenerPackages(context)
+            .contains(context.packageName)
+
     fun isIgnoringBatteryOptimizations(context: Context): Boolean {
         val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
         return pm.isIgnoringBatteryOptimizations(context.packageName)

@@ -169,6 +169,28 @@ fun SettingsScreen(
             }
         )
         PermissionRow(
+            title = "Bildirim erişimi",
+            subtitle = "WhatsApp mesajlarını okuma ve bildirimden cevap verme için",
+            granted = remember(refreshTick) { PermissionsHelper.isNotificationListenerEnabled(context) },
+            onRequest = {
+                val component = android.content.ComponentName(
+                    context,
+                    com.deepassist.service.MessageListenerService::class.java
+                ).flattenToString()
+                runCatching {
+                    if (android.os.Build.VERSION.SDK_INT < 30) error("no detail screen")
+                    context.startActivity(
+                        Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS)
+                            .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME, component)
+                    )
+                }.onFailure {
+                    runCatching {
+                        context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                    }
+                }
+            }
+        )
+        PermissionRow(
             title = "Pil optimizasyonu kapalı",
             subtitle = "Arka planda sürekli çalışabilmek için",
             granted = ignoresBattery,

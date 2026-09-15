@@ -7,6 +7,7 @@ import android.util.Log
 import com.deepassist.data.ToolProperty
 import com.deepassist.data.ToolResult
 import com.deepassist.service.AccessibilitySvc
+import com.deepassist.service.NotificationReplier
 import com.deepassist.util.DeviceUtils
 import com.google.gson.JsonObject
 import kotlinx.coroutines.Dispatchers
@@ -68,14 +69,13 @@ class WhatsAppTool : Tool() {
             return@withContext ToolResult(false, "", error = "Numara bulunamadı. Kişi adı veya numara belirtin.")
         }
 
+        // An unread chat from this person can be answered straight from its notification
+        val canReplyInline = NotificationReplier.hasWhatsAppTarget(resolvedNumber, resolvedName)
+
         // Without the accessibility service nothing can tap Send; opening WhatsApp would
         // only strand an unsent draft on a screen the user can't see.
-        if (AccessibilitySvc.instance == null) {
-            return@withContext ToolResult(
-                false, "",
-                error = "Erişilebilirlik servisi kapalı olduğu için WhatsApp mesajını gönderemiyorum. " +
-                    "Telefon ayarlarından deepAssist erişilebilirlik servisini açman gerekiyor."
-            )
+        if (AccessibilitySvc.instance == null && !canReplyInline) {
+            return@withContext ToolResult(false, "", error = ACCESSIBILITY_OFF)
         }
 
         // Never send on the model's own initiative — it must relay the user's yes.
@@ -88,6 +88,27 @@ class WhatsAppTool : Tool() {
 
         val number = DeviceUtils.toInternationalPhoneNumber(resolvedNumber)
         val who = resolvedName ?: number
+
+        if (canReplyInline) {
+            when (NotificationReplier.replyToWhatsApp(context, resolvedNumber, resolvedName, message)) {
+                NotificationReplier.Outcome.SENT -> {
+                    Log.d(TAG, "Sent via notification reply")
+                    return@withContext ToolResult(true, "$who kişisine mesaj gönderildi.")
+                }
+                // The reply may have gone out — reopening the chat could send it twice
+                NotificationReplier.Outcome.UNVERIFIED -> return@withContext ToolResult(
+                    false, "",
+                    error = "Mesaj WhatsApp bildiriminden gönderilmeye çalışıldı ama gidip gitmediği doğrulanamadı. " +
+                        "Kullanıcıya böyle söyle; mesajı ASLA kendiliğinden tekrar gönderme."
+                )
+                NotificationReplier.Outcome.NO_TARGET, NotificationReplier.Outcome.FAILED ->
+                    Log.w(TAG, "Notification reply unavailable, opening the chat instead")
+            }
+            if (AccessibilitySvc.instance == null) {
+                return@withContext ToolResult(false, "", error = ACCESSIBILITY_OFF)
+            }
+        }
+
         val encoded = Uri.encode(message)
         val direct = Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/$number?text=$encoded")).apply {
             setPackage("com.whatsapp")
@@ -141,5 +162,8 @@ class WhatsAppTool : Tool() {
 
     companion object {
         private const val TAG = "WhatsAppTool"
+        private const val ACCESSIBILITY_OFF =
+            "Erişilebilirlik servisi kapalı olduğu için WhatsApp mesajını gönderemiyorum. " +
+                "Telefon ayarlarından deepAssist erişilebilirlik servisini açman gerekiyor."
     }
 }
