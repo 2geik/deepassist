@@ -20,7 +20,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
  * OpenAI TTS client (tts-1 / nova). Requests raw 24kHz mono PCM and
  * streams it straight into an AudioTrack as it downloads, so speech starts on
  * the first chunk instead of after the whole file is synthesized. Playback is
- * sped up 1.25x via [PlaybackParams]; tts-1 has no speaking-style instructions,
+ * sped up 1.1x via [PlaybackParams]; tts-1 has no speaking-style instructions,
  * so pacing is set on the device.
  */
 class OpenAiTts(private val apiKeyProvider: () -> String) {
@@ -147,6 +147,6 @@ class OpenAiTts(private val apiKeyProvider: () -> String) {
 
     companion object {
         private const val SAMPLE_RATE = 24000
-        private const val PLAYBACK_SPEED = 1.25f
+        private const val PLAYBACK_SPEED = 1.1f
     }
 }
