@@ -294,8 +294,9 @@ class WebSearchTool : Tool() {
         const val EXA_CHARS_PER_RESULT = 1500
         const val EXA_MAX_CHARS = 6000
         const val READ_MORE =
-            "Özetler soruyu cevaplamaya yetmezse veya kullanıcı detay isterse read_web_page(result=numara, query=bu sorgu) " +
-                "ile o sayfanın tamamını oku.\n"
+            "Numaralar yalnızca senin içindir; kullanıcıya numara, site adı veya bağlantı söyleme. Genel aramada " +
+                "sonuçları doğal cümlelerle say; belirli bir soruda en alakalı sayfaları kendin seçip " +
+                "read_web_page(results=[...], query=bu sorgu) ile oku ve derli toplu cevap ver.\n"
         const val GROUNDING =
             "Cevabı yalnızca bu bilgilere dayandır; kaynaklarda olmayan rakam, tarih veya isim uydurma. " +
                 "Bilgi yetersizse bunu söyle."

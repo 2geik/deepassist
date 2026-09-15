@@ -49,20 +49,22 @@ class WebPageTool : Tool() {
 
     override val name = "read_web_page"
     override val description =
-        "search_web sonuçlarından birinin sayfasını açıp tam metnini getirir. Arama özetleri soruyu " +
-            "cevaplamaya yetmediğinde veya kullanıcı bir haberin, yazının, tarifin detayını istediğinde kullan."
+        "search_web sonuçlarından seçtiğin sayfaları açıp tam metinlerini getirir. Belirli bir konu hakkında " +
+            "bilgi istendiğinde en alakalı sayfaları kendin seçip oku; genel bir aramada sayılanlardan birinin " +
+            "detayı istendiğinde o sonucun sayfasını oku. Numaraları kullanıcıya asla söyleme."
     override val parameters = mapOf(
-        "result" to ToolProperty(
-            type = "integer",
-            description = "search_web sonucundaki sayfa numarası ([1], [2] ...)"
+        "results" to ToolProperty(
+            type = "array",
+            description = "Okunacak search_web sonuç numaraları, en alakalı olan önce (en fazla 3)",
+            items = ToolProperty(type = "integer", description = "Sonuç numarası")
         ),
         "query" to ToolProperty(
             type = "string",
             description = "O sonuçları getiren search_web sorgusu (aynen)"
         )
     )
-    override val required = listOf("result")
-    override val thinkingPhrase: String? = "Sayfayı okuyorum..."
+    override val required = listOf("results")
+    override val thinkingPhrase: String? = "Ayrıntılarına bakıyorum..."
 
     private val gson = Gson()
     private val client = OkHttpClient.Builder()
@@ -72,36 +74,60 @@ class WebPageTool : Tool() {
         .build()
 
     override suspend fun execute(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
-        val number = args.optInt("result")
-            ?: return@withContext ToolResult(false, "", error = "Sayfa numarası (result) belirtilmedi.")
+        val numbers = requestedNumbers(args)
+        if (numbers.isEmpty()) {
+            return@withContext ToolResult(false, "", error = "Okunacak sonuç numarası (results) belirtilmedi.")
+        }
         val pages = WebResults.pagesFor(args.optString("query")?.takeIf { it.isNotBlank() })
         if (pages.isEmpty()) {
             return@withContext ToolResult(false, "", error = "Açılabilecek arama sonucu yok. Önce search_web ile ara.")
         }
-        val page = pages.getOrNull(number - 1)
-            ?: return@withContext ToolResult(false, "", error = "Geçersiz sonuç numarası; 1 ile ${pages.size} arası olmalı.")
-        if (page.url.isBlank()) {
-            return@withContext ToolResult(false, "", error = "Bu sonucun bağlantısı yok; arama özetleriyle cevap ver.")
-        }
 
-        val text = fetchWithExa(page.url) ?: fetchDirect(page.url)
-        Log.d(TAG, "read [$number] ${page.url} → ${text?.length ?: 0} chars")
-        if (text.isNullOrBlank()) {
+        // One page may use the whole budget; several share it
+        val perPage = if (numbers.size == 1) PAGE_MAX_CHARS else MULTI_PAGE_MAX_CHARS
+        val read = mutableListOf<String>()
+        val failed = mutableListOf<String>()
+        for (number in numbers) {
+            val page = pages.getOrNull(number - 1)
+            if (page == null || page.url.isBlank()) {
+                failed += "[$number] geçersiz"
+                continue
+            }
+            val text = fetchWithExa(page.url, perPage) ?: fetchDirect(page.url)
+            Log.d(TAG, "read [$number] ${page.url} → ${text?.length ?: 0} chars")
+            if (text.isNullOrBlank()) failed += "[$number] ${page.title}" else read += "SAYFA [$number]: ${page.title}\n\n${text.take(perPage)}"
+        }
+        if (read.isEmpty()) {
             return@withContext ToolResult(
                 false, "",
-                error = "\"${page.title}\" sayfası açılamadı; arama özetleriyle cevap ver."
+                error = "Sayfalar açılamadı (${failed.joinToString()}); arama özetleriyle cevap ver."
             )
         }
+        val failures = if (failed.isEmpty()) "" else "\n\nAçılamayanlar: ${failed.joinToString()}"
         ToolResult(
             true,
-            "SAYFA [$number]: ${page.title}\n\n${text.take(PAGE_MAX_CHARS)}\n\n" +
-                "Cevabı bu sayfanın içeriğine dayandır; sayfada olmayan bilgi uydurma. " +
-                "Sesli okunacağı için gerekirse özetle."
+            read.joinToString("\n\n---\n\n") + failures + "\n\n" +
+                "Cevabı bu sayfaların içeriğine dayandır; sayfalarda olmayan bilgi uydurma. Birden fazla sayfa varsa " +
+                "bilgileri birleştirip tek, derli toplu bir cevap ver. Numara veya site adı söyleme; sesli okunacağı " +
+                "için gerekirse özetle."
         )
     }
 
+    /** `results` array (or a lone `result`), de-duplicated, at most [MAX_PAGES]. */
+    private fun requestedNumbers(args: JsonObject): List<Int> {
+        val numbers = mutableListOf<Int>()
+        runCatching {
+            args.get("results")?.takeIf { it.isJsonArray }?.asJsonArray?.forEach { element ->
+                runCatching { element.asInt }.getOrNull()?.let(numbers::add)
+            }
+        }
+        args.optInt("results")?.let(numbers::add)
+        args.optInt("result")?.let(numbers::add)
+        return numbers.distinct().take(MAX_PAGES)
+    }
+
     /** Exa's keyless `web_fetch_exa`: the page as clean markdown, usually well under a second. */
-    private fun fetchWithExa(url: String): String? = try {
+    private fun fetchWithExa(url: String, maxCharacters: Int): String? = try {
         val body = gson.toJson(
             mapOf(
                 "jsonrpc" to "2.0",
@@ -109,7 +135,7 @@ class WebPageTool : Tool() {
                 "method" to "tools/call",
                 "params" to mapOf(
                     "name" to "web_fetch_exa",
-                    "arguments" to mapOf("urls" to listOf(url), "maxCharacters" to PAGE_MAX_CHARS)
+                    "arguments" to mapOf("urls" to listOf(url), "maxCharacters" to maxCharacters)
                 )
             )
         )
@@ -181,7 +207,9 @@ class WebPageTool : Tool() {
 
     private companion object {
         const val TAG = "WebPage"
+        const val MAX_PAGES = 3
         const val PAGE_MAX_CHARS = 7000
+        const val MULTI_PAGE_MAX_CHARS = 4500
         const val MIN_PAGE_CHARS = 200
         const val MAX_HTML_CHARS = 1_500_000
         const val BROWSER_UA =
