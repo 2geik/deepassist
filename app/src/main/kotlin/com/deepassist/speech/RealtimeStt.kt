@@ -33,7 +33,7 @@ sealed class RealtimeSttResult {
 }
 
 /**
- * Live transcription over the OpenAI Realtime API (gpt-4o-transcribe).
+ * Live transcription over the OpenAI Realtime API (gpt-transcribe).
  * Microphone audio streams to the server while the user is still talking;
  * server-side VAD detects end of speech (~1.1s pause) and the transcript
  * streams back token by token through [onPartial] before finalizing — much
@@ -250,7 +250,7 @@ class RealtimeStt(private val apiKeyProvider: () -> String) {
                                 add(
                                     "transcription",
                                     JsonObject().apply {
-                                        addProperty("model", "gpt-4o-transcribe")
+                                        addProperty("model", "gpt-transcribe")
                                         addProperty("language", "tr")
                                     }
                                 )

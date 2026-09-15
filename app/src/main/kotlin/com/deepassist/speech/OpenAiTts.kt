@@ -17,11 +17,11 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
 /**
- * OpenAI TTS client (gpt-4o-mini-tts / marin). Requests raw 24kHz mono PCM and
+ * OpenAI TTS client (tts-1 / nova). Requests raw 24kHz mono PCM and
  * streams it straight into an AudioTrack as it downloads, so speech starts on
  * the first chunk instead of after the whole file is synthesized. Playback is
- * sped up 1.25x via [PlaybackParams] for a deterministic rate independent of
- * how the model itself interprets pacing instructions.
+ * sped up 1.25x via [PlaybackParams]; tts-1 has no speaking-style instructions,
+ * so pacing is set on the device.
  */
 class OpenAiTts(private val apiKeyProvider: () -> String) {
 
@@ -50,13 +50,10 @@ class OpenAiTts(private val apiKeyProvider: () -> String) {
         var playedAnything = false
         try {
             val payload = mapOf(
-                "model" to "gpt-4o-mini-tts",
+                "model" to "tts-1",
                 "input" to text.take(4000),
-                "voice" to "marin",
-                "response_format" to "pcm", // raw 24kHz mono pcm16 — streamable
-                "instructions" to
-                    "Türkçe konuş. Doğal, akıcı ve net bir asistan tonuyla seslendir. " +
-                    "Telefon numaralarını ve uzun sayı dizilerini rakam rakam, Türkçe olarak oku."
+                "voice" to "nova",
+                "response_format" to "pcm" // raw 24kHz mono pcm16 — streamable
             )
             val request = Request.Builder()
                 .url("https://api.openai.com/v1/audio/speech")

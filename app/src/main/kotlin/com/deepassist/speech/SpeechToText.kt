@@ -30,7 +30,7 @@ class SpeechToText(private val apiKeyProvider: () -> String) {
             try {
                 val body = MultipartBody.Builder()
                     .setType(MultipartBody.FORM)
-                    .addFormDataPart("model", "gpt-4o-transcribe")
+                    .addFormDataPart("model", "gpt-transcribe")
                     .addFormDataPart("language", language)
                     .addFormDataPart(
                         "file",
