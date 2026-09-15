@@ -692,12 +692,15 @@ class AssistantForegroundService : Service() {
 
     private fun isEndPhrase(text: String): Boolean {
         val t = text.lowercase(Locale("tr", "TR")).trim().trimEnd('.', '!', ',', '?')
-        val phrases = listOf(
+        val farewells = listOf(
             "görüşürüz", "görüşmeyi sonlandır", "görüşmeyi bitir", "görüşmeyi kapat",
-            "hoşça kal", "hoşçakal", "iptal", "iptal et", "boşver", "boş ver",
-            "tamam teşekkürler", "teşekkürler görüşürüz", "kapat"
+            "hoşça kal", "hoşçakal", "teşekkürler görüşürüz"
         )
-        return phrases.any { t == it } || (t.length <= 25 && phrases.any { t.contains(it) })
+        // Only on their own: "müziği kapat", "feneri kapat", "yarım saat sonra kapat"
+        // and "zamanlayıcıyı iptal et" are commands for the model, not goodbyes
+        val bareCommands = listOf("iptal", "iptal et", "boşver", "boş ver", "tamam teşekkürler", "kapat")
+        return (farewells + bareCommands).any { t == it } ||
+            (t.length <= 25 && farewells.any { t.contains(it) })
     }
 
     private suspend fun finishConversation(farewell: String) {

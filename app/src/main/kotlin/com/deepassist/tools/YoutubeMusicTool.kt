@@ -7,6 +7,7 @@ import android.util.Log
 import com.deepassist.SessionActivity
 import com.deepassist.data.ToolProperty
 import com.deepassist.data.ToolResult
+import com.deepassist.data.WatchHistoryStore
 import com.google.gson.JsonObject
 import java.net.URLEncoder
 import java.util.Locale
@@ -79,6 +80,7 @@ class YoutubeMusicTool : Tool() {
                 val url = if (isArtist) "${chosen.musicUrl}&list=RDAMVM${chosen.videoId}" else chosen.musicUrl
                 if (launchMusicUrl(url)) {
                     cacheRemove(query)
+                    recordPlayed(chosen, query)
                     return ToolResult(true, "AÇILDI: YouTube Music — ${chosen.title}")
                 }
             }
@@ -101,6 +103,7 @@ class YoutubeMusicTool : Tool() {
         if (isArtist) {
             val top = deduped.first()
             if (launchMusicUrl("${top.musicUrl}&list=RDAMVM${top.videoId}")) {
+                recordPlayed(top, query)
                 return ToolResult(true, "AÇILDI: YouTube Music radyo — $query. İlk: ${top.title}.")
             }
         }
@@ -108,6 +111,7 @@ class YoutubeMusicTool : Tool() {
         if (deduped.size == 1 || !isArtist) {
             val best = deduped.first()
             if (launchMusicVideo(best.videoId)) {
+                recordPlayed(best, query)
                 return ToolResult(true, "AÇILDI: YouTube Music — ${best.title}.")
             }
             launchMusicUrl("https://music.youtube.com/search?q=" + URLEncoder.encode(query, "UTF-8"))
@@ -164,6 +168,14 @@ class YoutubeMusicTool : Tool() {
             !(isVariant && title.contains(basePrefix))
         }
         return listOf(first) + significantOthers
+    }
+
+    /** Music goes into the shared history for "ne dinlemiştim" questions; it is never hidden from results. */
+    private fun recordPlayed(video: YoutubeSearchClient.YoutubeVideoResult, query: String) {
+        runCatching {
+            WatchHistoryStore.get(context)
+                .record(video.videoId, video.title, video.channel, query, WatchHistoryStore.KIND_MUSIC)
+        }
     }
 
     private fun looksLikeArtistName(query: String): Boolean {
