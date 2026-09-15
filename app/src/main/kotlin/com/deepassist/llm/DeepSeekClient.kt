@@ -37,7 +37,9 @@ data class StreamEvent(
     val toolCalls: List<AccumulatingToolCall>? = null,
     val finishReason: String? = null,
     val isComplete: Boolean = false,
-    val error: String? = null
+    val error: String? = null,
+    /** Thinking-mode reasoning of a tool-call turn; send it back as [Message.reasoning_content]. */
+    val reasoning: String? = null
 )
 
 class DeepSeekClient(private val apiKeyProvider: () -> String) {
@@ -76,6 +78,7 @@ class DeepSeekClient(private val apiKeyProvider: () -> String) {
 
             val accumulating = sortedMapOf<Int, AccumulatingToolCall>()
             var announcedFirstToolCall = false
+            val reasoning = StringBuilder()
 
             while (true) {
                 val line = source.readUtf8Line() ?: break
@@ -90,6 +93,8 @@ class DeepSeekClient(private val apiKeyProvider: () -> String) {
                 } ?: continue
                 val choice = parsed.choices?.firstOrNull() ?: continue
                 val delta = choice.delta
+
+                delta?.reasoning_content?.let { reasoning.append(it) }
 
                 // Disjoint branches (gotcha #6): a delta is either tool-call data or content
                 when {
@@ -119,7 +124,8 @@ class DeepSeekClient(private val apiKeyProvider: () -> String) {
                         emit(
                             StreamEvent(
                                 toolCalls = accumulating.values.toList(),
-                                finishReason = "tool_calls"
+                                finishReason = "tool_calls",
+                                reasoning = reasoning.toString().ifEmpty { null }
                             )
                         )
                         return@use
@@ -132,7 +138,13 @@ class DeepSeekClient(private val apiKeyProvider: () -> String) {
             }
             // Stream ended without an explicit finish_reason
             if (accumulating.isNotEmpty()) {
-                emit(StreamEvent(toolCalls = accumulating.values.toList(), finishReason = "tool_calls"))
+                emit(
+                    StreamEvent(
+                        toolCalls = accumulating.values.toList(),
+                        finishReason = "tool_calls",
+                        reasoning = reasoning.toString().ifEmpty { null }
+                    )
+                )
             } else {
                 emit(StreamEvent(finishReason = "stop", isComplete = true))
             }

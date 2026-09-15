@@ -444,6 +444,7 @@ class AssistantForegroundService : Service() {
 
             var streamError: String? = null
             var completedToolCalls: List<AccumulatingToolCall>? = null
+            var toolReasoning: String? = null
             var spokeThinking = false
             val content = StringBuilder()
 
@@ -452,7 +453,10 @@ class AssistantForegroundService : Service() {
                     when {
                         event.error != null -> streamError = event.error
 
-                        event.finishReason == "tool_calls" -> completedToolCalls = event.toolCalls
+                        event.finishReason == "tool_calls" -> {
+                            completedToolCalls = event.toolCalls
+                            toolReasoning = event.reasoning
+                        }
 
                         event.finishReason == "stop" -> Unit
 
@@ -483,7 +487,7 @@ class AssistantForegroundService : Service() {
 
             val toolCalls = completedToolCalls
             return if (!toolCalls.isNullOrEmpty()) {
-                runAgentLoop(toolCalls.map { it.toToolCall() }, spokeThinking)
+                runAgentLoop(toolCalls.map { it.toToolCall() }, spokeThinking, toolReasoning)
             } else {
                 val answer = content.toString().trim().ifBlank { "Bir cevap üretemedim." }
                 conversation.addAssistantMessage(answer)
@@ -507,8 +511,15 @@ class AssistantForegroundService : Service() {
      *
      * @return true when the conversation ended (end_conversation or error).
      */
-    private suspend fun runAgentLoop(initialToolCalls: List<ToolCall>, firstPhraseSpoken: Boolean): Boolean {
+    private suspend fun runAgentLoop(
+        initialToolCalls: List<ToolCall>,
+        firstPhraseSpoken: Boolean,
+        initialReasoning: String?
+    ): Boolean {
         var toolCalls = initialToolCalls
+        // deepseek-v4-flash thinks by default and answers HTTP 400 to a tool follow-up
+        // whose tool-call message lacks the reasoning that produced it
+        var reasoning = initialReasoning
         var phraseSpoken = firstPhraseSpoken
         var round = 0
 
@@ -523,7 +534,7 @@ class AssistantForegroundService : Service() {
                 return true
             }
 
-            conversation.addAssistantMessage(null, toolCalls)
+            conversation.addAssistantMessage(null, toolCalls, reasoning)
             val results = executeToolCalls(toolCalls, phraseSpoken)
             conversation.addMessages(ToolParser.buildToolCallMessages(toolCalls, results))
 
@@ -543,6 +554,7 @@ class AssistantForegroundService : Service() {
                 return false
             }
             toolCalls = nextCalls
+            reasoning = reply.reasoning_content
             phraseSpoken = false // each round announces its own first tool
         }
         handleError("İşlem çok fazla adım gerektirdi ve yarıda kesildi.")

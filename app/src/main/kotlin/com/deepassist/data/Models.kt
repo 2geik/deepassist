@@ -7,7 +7,9 @@ data class Message(
     val content: String? = null,
     val tool_calls: List<ToolCall>? = null,
     val tool_call_id: String? = null,
-    val name: String? = null
+    val name: String? = null,
+    /** Thinking mode: must go back with the assistant's tool-call message within the same turn. */
+    val reasoning_content: String? = null
 )
 
 data class ToolCall(
@@ -98,7 +100,8 @@ data class CallLogEntry(
 
 data class StreamDelta(
     val content: String?,
-    val tool_calls: List<StreamToolCallDelta>?
+    val tool_calls: List<StreamToolCallDelta>?,
+    val reasoning_content: String? = null
 )
 
 data class StreamToolCallDelta(

@@ -16,8 +16,8 @@ class ConversationManager(private val maxMessages: Int = 40) {
     }
 
     @Synchronized
-    fun addAssistantMessage(content: String?, toolCalls: List<ToolCall>? = null) {
-        add(Message(role = "assistant", content = content, tool_calls = toolCalls))
+    fun addAssistantMessage(content: String?, toolCalls: List<ToolCall>? = null, reasoning: String? = null) {
+        add(Message(role = "assistant", content = content, tool_calls = toolCalls, reasoning_content = reasoning))
     }
 
     @Synchronized
