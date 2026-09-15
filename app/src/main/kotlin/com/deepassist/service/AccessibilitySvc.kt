@@ -163,11 +163,16 @@ class AccessibilitySvc : AccessibilityService() {
 
         /**
          * Polls the active window until a clickable node whose text or content
-         * description contains [label] (or WhatsApp's send button) is found and
-         * clicked. Blocking — call off the main thread.
+         * description contains [label] (or the [fallbackViewId] node, WhatsApp's
+         * send button by default) is found and clicked. Blocking — call off the
+         * main thread.
          */
         @Suppress("DEPRECATION")
-        fun clickByLabel(label: String, timeoutMs: Long = 4_000L): Boolean {
+        fun clickByLabel(
+            label: String,
+            timeoutMs: Long = 4_000L,
+            fallbackViewId: String? = "com.whatsapp:id/send"
+        ): Boolean {
             val svc = instance ?: return false
             val deadline = SystemClock.elapsedRealtime() + timeoutMs
             while (SystemClock.elapsedRealtime() < deadline) {
@@ -177,7 +182,7 @@ class AccessibilitySvc : AccessibilityService() {
                     continue
                 }
                 val found = findClickableByLabel(root, label)
-                    ?: findClickableByViewId(root, "com.whatsapp:id/send")
+                    ?: fallbackViewId?.let { findClickableByViewId(root, it) }
                 root.recycle()
                 if (found != null) {
                     val ok = found.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK)
@@ -187,6 +192,39 @@ class AccessibilitySvc : AccessibilityService() {
                 Thread.sleep(150)
             }
             return false
+        }
+
+        /**
+         * Polls the active window for a clickable node with [viewId] and clicks it.
+         * With [packageName] set, only windows of that app are searched. Blocking.
+         */
+        @Suppress("DEPRECATION")
+        fun clickByViewId(viewId: String, timeoutMs: Long, packageName: String? = null): Boolean {
+            val svc = instance ?: return false
+            val deadline = SystemClock.elapsedRealtime() + timeoutMs
+            while (SystemClock.elapsedRealtime() < deadline) {
+                val root = svc.rootInActiveWindow
+                if (root != null) {
+                    val found = if (packageName == null || root.packageName?.toString() == packageName) {
+                        findClickableByViewId(root, viewId)
+                    } else null
+                    root.recycle()
+                    if (found != null) {
+                        val ok = found.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK)
+                        found.recycle()
+                        if (ok) return true
+                    }
+                }
+                Thread.sleep(150)
+            }
+            return false
+        }
+
+        /** Package of the window currently in front, or null when unknown. */
+        @Suppress("DEPRECATION")
+        fun activePackage(): String? {
+            val root = instance?.rootInActiveWindow ?: return null
+            return root.packageName?.toString().also { root.recycle() }
         }
 
         fun pressBack(): Boolean =

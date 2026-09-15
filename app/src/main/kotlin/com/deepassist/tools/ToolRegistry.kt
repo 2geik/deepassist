@@ -13,6 +13,7 @@ class ToolRegistry(askUserCallback: suspend (String) -> String?) {
         register(SmsReadTool())
         register(SmsSendTool())
         register(WhatsAppTool())
+        register(WhatsAppCallTool())
         register(NotificationReadTool())
         register(WebSearchTool())
         register(DeviceInfoTool())
