@@ -18,6 +18,7 @@ class ToolRegistry(askUserCallback: suspend (String) -> String?) {
         register(NotificationReadTool())
         register(ReadMessagesTool())
         register(WebSearchTool())
+        register(WebPageTool())
         register(DeviceInfoTool())
         register(YoutubeMusicTool())
         register(YoutubeVideoTool())

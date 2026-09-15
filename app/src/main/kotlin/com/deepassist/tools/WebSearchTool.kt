@@ -23,7 +23,7 @@ class WebSearchTool : Tool() {
 
     override val name = "search_web"
     override val description =
-        "İnternette arama yapar ve özet sonuçlar döndürür. Güncel bilgiler ve genel bilgi " +
+        "İnternette arama yapar ve numaralı özet sonuçlar döndürür. Güncel bilgiler ve genel bilgi " +
             "soruları için kullanılır."
     override val parameters = mapOf(
         "query" to ToolProperty(
@@ -70,6 +70,8 @@ class WebSearchTool : Tool() {
             }
         }
 
+        // DuckDuckGo results can't be opened with read_web_page
+        WebResults.remember(query, emptyList())
         runProvider("DuckDuckGo") { searchInstantAnswers(query) }?.let {
             return@withContext ToolResult(true, it.take(2500))
         }
@@ -105,7 +107,7 @@ class WebSearchTool : Tool() {
             )
         )
         val request = Request.Builder()
-            .url(EXA_MCP_URL)
+            .url(WebResults.EXA_MCP_URL)
             .header("Accept", "application/json, text/event-stream")
             .header("User-Agent", "deepAssist/1.0 (Android)")
             .post(body.toRequestBody("application/json".toMediaType()))
@@ -127,17 +129,24 @@ class WebSearchTool : Tool() {
             val text = result.getAsJsonArray("content")
                 ?.joinToString("\n") { it.asJsonObject.get("text")?.asString.orEmpty() }
                 .orEmpty()
-            return formatExa(text)
+            return formatExa(query, text)
         }
     }
 
-    /** Keeps each result's title, date and highlights; URLs and authors are noise when read aloud. */
-    private fun formatExa(text: String): String? {
+    /**
+     * Numbers each result and keeps its title, date and highlights; the URL is kept
+     * aside for read_web_page, the author is noise when read aloud.
+     */
+    private fun formatExa(query: String, text: String): String? {
+        val pages = mutableListOf<WebResults.Page>()
         val sources = text.split(EXA_RESULT_START)
             .map { it.trim() }
             .filter { it.startsWith("Title: ") }
             .map { block ->
-                block.lineSequence()
+                val lines = block.lines()
+                val url = lines.firstOrNull { it.startsWith("URL: ") }?.removePrefix("URL: ")?.trim().orEmpty()
+                pages += WebResults.Page(lines.first().removePrefix("Title: ").trim(), url)
+                val kept = lines
                     .filterNot {
                         it.startsWith("URL: ") || it.startsWith("Author: ") ||
                             it == "Published: N/A" || it.trim() == "---"
@@ -145,9 +154,12 @@ class WebSearchTool : Tool() {
                     .joinToString("\n")
                     .replace(BLANK_LINES, "\n")
                     .take(EXA_CHARS_PER_RESULT)
+                "[${pages.size}] $kept"
             }
         if (sources.isEmpty()) return null
-        return ("Kaynaklar:\n\n" + sources.joinToString("\n\n")).take(EXA_MAX_CHARS) + "\n\n" + GROUNDING
+        WebResults.remember(query, pages)
+        return ("Kaynaklar:\n\n" + sources.joinToString("\n\n")).take(EXA_MAX_CHARS) +
+            "\n\n" + READ_MORE + GROUNDING
     }
 
     /**
@@ -177,20 +189,24 @@ class WebSearchTool : Tool() {
             }
             val json = JsonParser.parseString(resp.body?.string() ?: return null).asJsonObject
             val answer = json.get("answer")?.takeIf { it.isJsonPrimitive }?.asString?.trim().orEmpty()
+            val pages = mutableListOf<WebResults.Page>()
             val sources = json.getAsJsonArray("results")?.mapNotNull { element ->
                 val result = element.asJsonObject
                 val content = result.get("content")?.takeIf { it.isJsonPrimitive }?.asString?.trim().orEmpty()
                 if (content.isEmpty()) return@mapNotNull null
                 val title = result.get("title")?.takeIf { it.isJsonPrimitive }?.asString?.trim().orEmpty()
+                val url = result.get("url")?.takeIf { it.isJsonPrimitive }?.asString?.trim().orEmpty()
                 val date = result.get("published_date")?.takeIf { it.isJsonPrimitive }?.asString
                     ?.take(10)?.let { " ($it)" } ?: ""
-                "- $title$date: ${content.take(600)}"
+                pages += WebResults.Page(title, url)
+                "[${pages.size}] $title$date: ${content.take(600)}"
             }.orEmpty()
             if (answer.isEmpty() && sources.isEmpty()) return null
+            WebResults.remember(query, pages)
 
             return buildString {
                 if (answer.isNotEmpty()) append("Kısa özet (İngilizce olabilir, Türkçe anlat): $answer\n\n")
-                if (sources.isNotEmpty()) append("Kaynaklar:\n${sources.joinToString("\n")}\n\n")
+                if (sources.isNotEmpty()) append("Kaynaklar:\n${sources.joinToString("\n")}\n\n$READ_MORE")
                 append(GROUNDING)
             }.take(4000)
         }
@@ -275,9 +291,11 @@ class WebSearchTool : Tool() {
 
     private companion object {
         const val TAG = "WebSearch"
-        const val EXA_MCP_URL = "https://mcp.exa.ai/mcp"
         const val EXA_CHARS_PER_RESULT = 1500
         const val EXA_MAX_CHARS = 6000
+        const val READ_MORE =
+            "Özetler soruyu cevaplamaya yetmezse veya kullanıcı detay isterse read_web_page(result=numara, query=bu sorgu) " +
+                "ile o sayfanın tamamını oku.\n"
         const val GROUNDING =
             "Cevabı yalnızca bu bilgilere dayandır; kaynaklarda olmayan rakam, tarih veya isim uydurma. " +
                 "Bilgi yetersizse bunu söyle."
