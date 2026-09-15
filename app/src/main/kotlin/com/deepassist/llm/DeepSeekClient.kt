@@ -196,6 +196,6 @@ class DeepSeekClient(private val apiKeyProvider: () -> String) {
 
     companion object {
         private const val ENDPOINT = "https://api.deepseek.com/chat/completions"
-        private const val MODEL = "deepseek-v4-flash"
+        private const val MODEL = "deepseek-flash"
     }
 }
