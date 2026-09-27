@@ -1,8 +1,8 @@
 # deepAssist
 
-An experimental Android voice assistant designed for Turkish speech and accessibility. It listens to a request, transcribes it with OpenAI, sends the text and available tool definitions to DeepSeek, performs the selected device action, and speaks the answer. The app can also keep conversation history and short memories on the device.
+deepAssist is an experimental Android voice assistant I developed for people who are blind or have low vision. Its voice first design aims to make everyday phone tasks possible with less screen navigation. It listens to a request, transcribes it, uses an AI model to decide which available actions to take, and speaks the result.
 
-**Türkçe özet:** deepAssist; Türkçe sesli komutlarla arama, mesaj, cihaz denetimi ve web araması gibi işlemleri yapan deneysel bir Android asistanıdır. Kurulum ve güvenlik ayrıntıları aşağıdadır.
+**Türkçe özet:** deepAssist, görme engelli kullanıcıların telefonu daha az ekrana bağımlı kullanabilmesi için geliştirdiğim deneysel bir Android sesli asistanıdır. Türkçe konuşmaları anlayıp arama, mesaj, cihaz denetimi ve web araştırması gibi işleri sesli etkileşimle yürütür.
 
 ## What it does
 
@@ -10,6 +10,12 @@ An experimental Android voice assistant designed for Turkish speech and accessib
 - Tool based actions for calls, SMS, contacts, WhatsApp, notifications, media, YouTube, timers, device controls, location, weather, exchange rates, and web search.
 - Local conversation history, saved memories, and notification/message history.
 - Optional Tavily search fallback. Web search also tries Exa and DuckDuckGo without a personal API key.
+
+## Agent capabilities
+
+The assistant can carry out a request in several steps instead of matching one phrase to one fixed command. It selects from the tools available on the phone, uses a tool's result to decide the next step, and then gives a spoken answer. For example, it can look up a contact before placing a call, search the web and read a relevant page before answering, or check device context before changing a setting.
+
+It can ask a spoken follow up when a request is ambiguous, request confirmation before calls or messages, and continue a conversation after completing an action. Saved memories and conversation history can provide context for later requests. Actions remain limited by Android permissions, installed apps, available services, and the tools implemented in this repository.
 
 This is a prototype. Some actions depend on installed apps, Android version, granted permissions, and third party services. Review the permissions and source before installing it on a personal phone.
 
