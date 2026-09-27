@@ -3,7 +3,6 @@ package com.deepassist
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
-import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -20,7 +19,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -33,10 +31,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.deepassist.data.SecureStore
-import com.deepassist.service.AssistantForegroundService
 import com.deepassist.util.PermissionsHelper
 
 @Composable
@@ -47,9 +43,6 @@ fun SettingsScreen(
     onRequestCallLogPermission: () -> Unit
 ) {
     val context = LocalContext.current
-    var openAiKey by remember { mutableStateOf(secureStore.openAiApiKey) }
-    var deepseekKey by remember { mutableStateOf(secureStore.deepseekApiKey) }
-    var tavilyKey by remember { mutableStateOf(secureStore.tavilyApiKey) }
     var voiceEnabled by remember { mutableStateOf(secureStore.voiceResponseEnabled) }
 
     val hasRuntime = remember(refreshTick) { PermissionsHelper.hasAllRuntimePermissions(context) }
@@ -71,46 +64,6 @@ fun SettingsScreen(
             style = MaterialTheme.typography.bodyMedium,
             color = Color.Gray
         )
-
-        Spacer(Modifier.height(20.dp))
-
-        OutlinedTextField(
-            value = openAiKey,
-            onValueChange = { openAiKey = it },
-            label = { Text("OpenAI API Anahtarı (STT için)") },
-            visualTransformation = PasswordVisualTransformation(),
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
-        )
-        Spacer(Modifier.height(12.dp))
-        OutlinedTextField(
-            value = deepseekKey,
-            onValueChange = { deepseekKey = it },
-            label = { Text("DeepSeek API Anahtarı (LLM için)") },
-            visualTransformation = PasswordVisualTransformation(),
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
-        )
-        Spacer(Modifier.height(12.dp))
-        OutlinedTextField(
-            value = tavilyKey,
-            onValueChange = { tavilyKey = it },
-            label = { Text("Tavily API Anahtarı (internet araması, isteğe bağlı)") },
-            visualTransformation = PasswordVisualTransformation(),
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
-        )
-        Spacer(Modifier.height(12.dp))
-        Button(
-            onClick = {
-                secureStore.openAiApiKey = openAiKey
-                secureStore.deepseekApiKey = deepseekKey
-                secureStore.tavilyApiKey = tavilyKey
-                AssistantForegroundService.start(context)
-                Toast.makeText(context, "Kaydedildi", Toast.LENGTH_SHORT).show()
-            },
-            modifier = Modifier.fillMaxWidth()
-        ) { Text("Kaydet") }
 
         Spacer(Modifier.height(20.dp))
 

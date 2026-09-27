@@ -24,17 +24,11 @@ class SecureStore(context: Context) {
         context.getSharedPreferences("deepassist_fallback", Context.MODE_PRIVATE)
     }
 
-    var openAiApiKey: String
-        get() = prefs.getString(KEY_OPENAI, DEFAULT_OPENAI) ?: DEFAULT_OPENAI
-        set(value) = prefs.edit().putString(KEY_OPENAI, value.trim()).apply()
+    val openAiApiKey: String get() = BuildConfig.OPENAI_API_KEY
 
-    var deepseekApiKey: String
-        get() = prefs.getString(KEY_DEEPSEEK, DEFAULT_DEEPSEEK) ?: DEFAULT_DEEPSEEK
-        set(value) = prefs.edit().putString(KEY_DEEPSEEK, value.trim()).apply()
+    val deepseekApiKey: String get() = BuildConfig.DEEPSEEK_API_KEY
 
-    var tavilyApiKey: String
-        get() = prefs.getString(KEY_TAVILY, DEFAULT_TAVILY) ?: DEFAULT_TAVILY
-        set(value) = prefs.edit().putString(KEY_TAVILY, value.trim()).apply()
+    val tavilyApiKey: String get() = BuildConfig.TAVILY_API_KEY
 
     var voiceResponseEnabled: Boolean
         get() = prefs.getBoolean(KEY_VOICE_RESPONSE, true)
@@ -45,15 +39,6 @@ class SecureStore(context: Context) {
     fun hasDeepSeekKey(): Boolean = deepseekApiKey.isNotBlank()
 
     companion object {
-        private const val KEY_OPENAI = "openai_api_key"
-        private const val KEY_DEEPSEEK = "deepseek_api_key"
-        private const val KEY_TAVILY = "tavily_api_key"
         private const val KEY_VOICE_RESPONSE = "voice_response_enabled"
-
-        // Defaults come from BuildConfig, generated at build time from the
-        // gitignored local.properties — never hardcoded in source/git history.
-        private val DEFAULT_OPENAI = BuildConfig.OPENAI_API_KEY
-        private val DEFAULT_DEEPSEEK = BuildConfig.DEEPSEEK_API_KEY
-        private val DEFAULT_TAVILY = BuildConfig.TAVILY_API_KEY
     }
 }

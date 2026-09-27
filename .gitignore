@@ -1,6 +1,9 @@
 *.iml
 .gradle/
 /local.properties
+/.env
+/.env.*
+!/.env.example
 /.idea/
 .DS_Store
 /build/
@@ -10,4 +13,6 @@
 .cxx/
 *.keystore
 *.jks
+*.apk
+*.aab
 .claude/

@@ -15,8 +15,7 @@ import java.util.concurrent.TimeUnit
 /**
  * YouTube search via the InnerTube API (`youtubei/v1/search`, WEB client).
  * Free, no user API key. The public InnerTube key is scraped from youtube.com
- * and cached for 6 hours so key rotation is picked up; fallback keys cover
- * scrape failures.
+ * and cached for 6 hours so key rotation is picked up.
  */
 object YoutubeSearchClient {
 
@@ -31,12 +30,6 @@ object YoutubeSearchClient {
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .build()
-
-    private val FALLBACK_KEYS = listOf(
-        "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
-        "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w",
-        "AIzaSyCzX2vSYu3gxN3iYJ8t_t7aFqUJxRsqNSM"
-    )
 
     @Volatile private var cachedKey: String? = null
     @Volatile private var keyCachedAt = 0L
@@ -53,7 +46,7 @@ object YoutubeSearchClient {
 
     suspend fun search(query: String, maxResults: Int = 5): List<YoutubeVideoResult> =
         withContext(Dispatchers.IO) {
-            val key = getApiKey()
+            val key = getApiKey() ?: return@withContext emptyList()
             val body = buildSearchRequest(query)
                 .toRequestBody("application/json; charset=utf-8".toMediaType())
             val request = Request.Builder()
@@ -80,7 +73,7 @@ object YoutubeSearchClient {
             }
         }
 
-    private fun getApiKey(): String {
+    private fun getApiKey(): String? {
         val now = System.currentTimeMillis()
         cachedKey?.let {
             if (now - keyCachedAt < KEY_TTL_MS) return it
@@ -92,11 +85,8 @@ object YoutubeSearchClient {
             keyCachedAt = now
             return extracted
         }
-        val fallback = FALLBACK_KEYS.first()
-        Log.w(TAG, "Using fallback InnerTube key")
-        cachedKey = fallback
-        keyCachedAt = now
-        return fallback
+        Log.w(TAG, "InnerTube key unavailable")
+        return null
     }
 
     private fun fetchKeyFromYouTube(): String? = try {

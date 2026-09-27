@@ -5,11 +5,15 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-// Local-only secrets (local.properties is gitignored, never committed) baked
-// into BuildConfig so the app works out of the box without manual key entry.
-val localProperties = Properties().apply {
-    val file = rootProject.file("local.properties")
+// .env stays outside Git. Its values are embedded in the APK at build time.
+val envProperties = Properties().apply {
+    val file = rootProject.file(".env")
     if (file.exists()) file.inputStream().use { load(it) }
+}
+
+fun envBuildConfigString(name: String): String {
+    val value = envProperties.getProperty(name, "").trim()
+    return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 }
 
 android {
@@ -25,15 +29,15 @@ android {
 
         buildConfigField(
             "String", "DEEPSEEK_API_KEY",
-            "\"${localProperties.getProperty("DEEPSEEK_API_KEY", "")}\""
+            envBuildConfigString("DEEPSEEK_API_KEY")
         )
         buildConfigField(
             "String", "OPENAI_API_KEY",
-            "\"${localProperties.getProperty("OPENAI_API_KEY", "")}\""
+            envBuildConfigString("OPENAI_API_KEY")
         )
         buildConfigField(
             "String", "TAVILY_API_KEY",
-            "\"${localProperties.getProperty("TAVILY_API_KEY", "")}\""
+            envBuildConfigString("TAVILY_API_KEY")
         )
     }
 

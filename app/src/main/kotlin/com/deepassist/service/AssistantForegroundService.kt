@@ -893,8 +893,8 @@ class AssistantForegroundService : Service() {
 
     private fun computeStatusText(): String {
         val missing = mutableListOf<String>()
-        if (!secureStore.hasOpenAiKey()) missing.add("OpenAI anahtarı")
-        if (!secureStore.hasDeepSeekKey()) missing.add("DeepSeek anahtarı")
+        if (!secureStore.hasOpenAiKey()) missing.add("OpenAI anahtarı (derleme)")
+        if (!secureStore.hasDeepSeekKey()) missing.add("DeepSeek anahtarı (derleme)")
         if (!PermissionsHelper.hasMicrophone(this)) missing.add("mikrofon izni")
         if (!PermissionsHelper.hasOverlay(this)) missing.add("ekran üstü izni")
         if (!PermissionsHelper.isAccessibilityEnabled(this)) missing.add("erişilebilirlik servisi")
