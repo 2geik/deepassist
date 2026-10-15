@@ -40,8 +40,8 @@ import com.deepassist.speech.OpenAiTts
 import com.deepassist.speech.RealtimeStt
 import com.deepassist.speech.RealtimeSttResult
 import com.deepassist.speech.SpeechToText
+import com.deepassist.agent.ScreenAgent
 import com.deepassist.camera.LastPhoto
-import com.deepassist.tools.CameraLookTool
 import com.deepassist.tools.EndConversationTool
 import com.deepassist.tools.Tool
 import com.deepassist.tools.ToolRegistry
@@ -142,7 +142,8 @@ class AssistantForegroundService : Service() {
         realtimeStt = RealtimeStt { secureStore.openAiApiKey }
         stt = SpeechToText { secureStore.openAiApiKey }
         toolRegistry = ToolRegistry({ question -> askUser(question) }, deepSeek)
-        CameraLookTool.playEarcon = { earcons.play(it) }
+        Tool.playEarcon = { earcons.play(it) }
+        Tool.say = { text -> awaitPhrase(); speak(text) }
         toolRegistry.initialize(this)
         chatHistory = ChatHistoryStore.get(this)
 
@@ -899,8 +900,9 @@ class AssistantForegroundService : Service() {
             val listener = AudioManager.OnAudioFocusChangeListener { change ->
                 when (change) {
                     AudioManager.AUDIOFOCUS_LOSS -> {
-                        // Permanent loss (e.g. incoming call) — end the session
-                        endCurrentSession()
+                        // Permanent loss (e.g. incoming call) — end the session. While the
+                        // screen agent works, the loss is an app it opened starting audio.
+                        if (!ScreenAgent.running) endCurrentSession()
                     }
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                         // Temporary loss (notification sound, navigation prompt)

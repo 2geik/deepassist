@@ -23,6 +23,7 @@ class ToolRegistry(askUserCallback: suspend (String) -> String?, deepSeek: DeepS
         register(DeviceInfoTool())
         register(CameraLookTool(deepSeek))
         register(ReadScreenTool(deepSeek))
+        register(UsePhoneTool(deepSeek))
         register(YoutubeMusicTool())
         register(YoutubeVideoTool())
         register(WatchHistoryTool())

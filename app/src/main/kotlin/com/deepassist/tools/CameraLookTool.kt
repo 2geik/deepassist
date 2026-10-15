@@ -107,10 +107,6 @@ class CameraLookTool(private val deepSeek: DeepSeekClient) : Tool() {
     }
 
     companion object {
-        /** Set by the service; plays the shutter sound once the photo is taken. */
-        @Volatile
-        var playEarcon: ((Earcons.Sound) -> Unit)? = null
-
         // Tuned on Turkish labels and bills against deepseek-flash (thinking off, ~2 s)
         private val SYSTEM_PROMPT = """
 Sen görme engelli bir kullanıcının gözüsün. Kullanıcı telefonunun arka kamerasıyla bir fotoğraf çekti ve sesli bir soru sordu. Cevabın sesli okunacak.

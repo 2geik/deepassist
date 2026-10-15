@@ -51,6 +51,14 @@ abstract class Tool {
          */
         @Volatile
         var releaseAudioFocusForMediaControl: (suspend () -> Unit)? = null
+
+        /** Set by the service: speaks a short status line and waits for it to finish. */
+        @Volatile
+        var say: (suspend (String) -> Unit)? = null
+
+        /** Set by the service: plays a feedback sound (shutter, agent step). */
+        @Volatile
+        var playEarcon: ((com.deepassist.speech.Earcons.Sound) -> Unit)? = null
     }
 
     /** Phrase computed once full arguments are available (e.g. "{isim}'i arıyorum..."). */

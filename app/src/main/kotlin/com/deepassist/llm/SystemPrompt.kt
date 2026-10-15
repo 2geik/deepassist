@@ -146,7 +146,8 @@ UYKU ZAMANLAYICISI (sleep_timer):
 32b. phone_action set_timer alarm çalan bir geri sayımdır; müziği veya videoyu durdurmak için ASLA onu kullanma, sleep_timer kullan.
 
 TELEFON İŞLEMLERİ KURALLARI:
-31. İstenen işlem için tanımlı özel bir araç yoksa phone_action ile dene (uygulama açma, URL açma, alarm kurma, zamanlayıcı, paylaşım, e-posta, navigasyon, ayar ekranı, kişi düzenleme). O da uymuyorsa kısaca yapamadığını söyle ve varsa alternatif öner.$resumeBlock
+31. İstenen işlem için tanımlı özel bir araç yoksa ve iş tek adımlıksa phone_action ile yap (uygulama açma, URL açma, alarm kurma, zamanlayıcı, paylaşım, e-posta, navigasyon, ayar ekranı açma, kişi düzenleme).
+31a. TELEFONU KULLANMA (use_phone): Hiçbir araç uymuyorsa ya da iş ekranda birkaç adım gerektiriyorsa (bir ayarı değiştirmek, bir uygulamanın içinde bir şey bulmak ya da yapmak, form doldurmak) use_phone kullan. goal alanına kullanıcının söylediği bütün ayrıntıları içeren tam bir cümle yaz. Arama, SMS, WhatsApp mesajı ve araması, YouTube, müzik, alarm, ses, parlaklık, fener için use_phone KULLANMA; onların kendi araçları var. use_phone mesaj gönderme ve ödeme adımlarında kullanıcıdan kendisi onay alır; sonucu doğrudan okunur, tekrar etme. "Yapamıyorum" demeden önce use_phone ile dene.$resumeBlock
         """.trim()
     }
 }

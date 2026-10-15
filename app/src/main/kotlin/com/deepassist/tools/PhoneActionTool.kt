@@ -9,7 +9,7 @@ import android.provider.ContactsContract
 import android.provider.Settings
 import com.deepassist.data.ToolProperty
 import com.deepassist.data.ToolResult
-import com.deepassist.util.DeviceUtils
+import com.deepassist.util.AppLauncher
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import kotlinx.coroutines.Dispatchers
@@ -149,51 +149,12 @@ class PhoneActionTool : Tool() {
     private fun executeOpenApp(args: JsonObject): ToolResult {
         val appName = args.optString("app_name")?.trim()
             ?: return ToolResult(false, "", error = "Uygulama adı (app_name) belirtilmedi.")
-
-        val pm = context.packageManager
-        val mainIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-        val resolveInfos = pm.queryIntentActivities(mainIntent, 0)
-
-        var bestMatch: String? = null
-        var bestLabel: String? = null
-
-        // Prefer exact match (ignoring case / Turkish chars)
-        val asciiAppName = DeviceUtils.toAsciiTurkce(appName)
-        for (ri in resolveInfos) {
-            val label = ri.loadLabel(pm).toString()
-            val asciiLabel = DeviceUtils.toAsciiTurkce(label)
-            if (asciiLabel == asciiAppName) {
-                bestMatch = ri.activityInfo.packageName
-                bestLabel = label
-                break
-            }
+        val app = AppLauncher.find(context, appName)
+            ?: return ToolResult(true, "Telefonda \"$appName\" adlı bir uygulama bulunamadı.")
+        if (!AppLauncher.launch(context, app)) {
+            return ToolResult(false, "", error = "\"${app.label}\" uygulaması açılamadı.")
         }
-
-        // Fallback to contains match
-        if (bestMatch == null) {
-            for (ri in resolveInfos) {
-                val label = ri.loadLabel(pm).toString()
-                val asciiLabel = DeviceUtils.toAsciiTurkce(label)
-                if (asciiLabel.contains(asciiAppName)) {
-                    bestMatch = ri.activityInfo.packageName
-                    bestLabel = label
-                    break
-                }
-            }
-        }
-
-        if (bestMatch == null) {
-            return ToolResult(true, "Rehberde \"$appName\" uygulaması bulunamadı.")
-        }
-
-        val launchIntent = pm.getLaunchIntentForPackage(bestMatch)
-        if (launchIntent == null) {
-            return ToolResult(false, "", error = "\"$bestLabel\" uygulaması açılamadı.")
-        }
-
-        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        context.startActivity(launchIntent)
-        return ToolResult(true, "\"$bestLabel\" uygulaması açıldı.")
+        return ToolResult(true, "\"${app.label}\" uygulaması açıldı.")
     }
 
     // ----------------------------------------------------------------
