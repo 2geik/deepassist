@@ -45,6 +45,7 @@ import com.deepassist.speech.SpeechToText
 import com.deepassist.tools.EndConversationTool
 import com.deepassist.tools.Tool
 import com.deepassist.tools.ToolRegistry
+import com.deepassist.util.DiagLog
 import com.deepassist.util.PermissionsHelper
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -56,6 +57,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -79,7 +81,13 @@ import kotlinx.coroutines.withTimeoutOrNull
  */
 class AssistantForegroundService : Service() {
 
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    // An exception escaping a coroutine must not kill the process: a crash also
+    // knocks out the accessibility service, and Android doesn't rebind it by itself
+    private val crashGuard = CoroutineExceptionHandler { _, e ->
+        Log.e(TAG, "uncaught coroutine error", e)
+        DiagLog.event("Service", "coroutine error ${DiagLog.describe(e)}")
+    }
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default + crashGuard)
 
     private lateinit var secureStore: SecureStore
     private lateinit var conversation: ConversationManager
@@ -105,6 +113,8 @@ class AssistantForegroundService : Service() {
     private val processing = AtomicBoolean(false)
 
     @Volatile private var pendingQuestion: CancellableContinuation<String?>? = null
+    @Volatile private var pendingListenJob: Job? = null
+    @Volatile private var lastFgsType = -1
     @Volatile private var phraseJob: Job? = null
     private var screenOffReceiver: BroadcastReceiver? = null
     @Volatile private var hadError = false
@@ -116,6 +126,7 @@ class AssistantForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        DiagLog.event("Service", "onCreate")
         createNotificationChannel()
         secureStore = SecureStore(this)
         notifyStartupStatus()
@@ -143,7 +154,10 @@ class AssistantForegroundService : Service() {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 if (intent?.action == Intent.ACTION_SCREEN_OFF && currentSessionJob?.isActive == true) {
-                    lastScreenOffEndAt = SystemClock.elapsedRealtime()
+                    // Only a session the user could see was ended on purpose. Ending a
+                    // headless one must not swallow the second press of a new trigger.
+                    if (SessionActivity.isShowing()) lastScreenOffEndAt = SystemClock.elapsedRealtime()
+                    DiagLog.event("Session", "ended by screen off")
                     endCurrentSession()
                 }
             }
@@ -156,9 +170,16 @@ class AssistantForegroundService : Service() {
         }
 
         AccessibilitySvc.onPowerKeyDetected = { handleTrigger() }
+        AccessibilitySvc.onStateChanged = { updateNotification(computeStatusText()) }
+        // A stalled accessibility service only shows once the grace period is over
+        serviceScope.launch {
+            delay(AccessibilitySvc.CONNECT_GRACE_MS + 2_000L)
+            updateNotification(computeStatusText())
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        DiagLog.event("Service", "start ${intent?.action?.substringAfterLast('.') ?: "sticky"}")
         when (intent?.action) {
             ACTION_VOICE_TRIGGER, ACTION_POWER_TRIGGER, ACTION_TAP_TRIGGER ->
                 handleTrigger(intent?.getStringExtra(EXTRA_RESUME_CHAT_ID))
@@ -180,7 +201,9 @@ class AssistantForegroundService : Service() {
         // An open ask_user question: the trigger means "I'm answering now"
         if (pendingQuestion != null && !listening.get()) {
             Log.i(TAG, "trigger: answering pending question")
-            serviceScope.launch { listenForPendingAnswer() }
+            DiagLog.event("Session", "trigger answers pending question")
+            SessionActivity.relaunchSuppressed = false
+            pendingListenJob = serviceScope.launch { listenForPendingAnswer() }
             return
         }
 
@@ -195,7 +218,9 @@ class AssistantForegroundService : Service() {
         listening.set(true)
         processing.set(true)
         uiHandedOff = false
+        sessionActive = true
         Log.i(TAG, "session $generation starting")
+        DiagLog.event("Session", "$generation start")
 
         currentSessionJob = serviceScope.launch {
             // Let the cancelled session release the microphone and TTS first
@@ -218,7 +243,6 @@ class AssistantForegroundService : Service() {
                     SystemPrompt.build(this@AssistantForegroundService, resumeTranscript)
                 )
 
-                runCatching { startForegroundCompat(buildNotification("Dinliyorum...")) }
                 if (PermissionsHelper.hasOverlay(this@AssistantForegroundService)) {
                     OverlayService.newSession(this@AssistantForegroundService, "Dinliyorum...")
                 }
@@ -226,7 +250,12 @@ class AssistantForegroundService : Service() {
                     val historyMessages = resumeRecord.messages.map { (it.role == "user") to it.text }
                     OverlayService.seedHistory(this@AssistantForegroundService, historyMessages)
                 }
+                // With the panel on screen the app counts as in use, so Android grants the
+                // microphone type even when the service itself was restarted in the background
+                awaitPanel()
+                startForegroundCompat(buildNotification("Dinliyorum..."))
                 requestAudioFocus()
+                warnIfPowerTriggerBroken()
 
                 var turn = 0
                 var sessionEnded = false
@@ -240,9 +269,9 @@ class AssistantForegroundService : Service() {
                     if (text.isNullOrBlank()) {
                         if (turn == 1) {
                             val hint = if (!secureStore.hasOpenAiKey()) {
-                                "OpenAI API anahtarı ayarlanmadığı için seni duyamıyorum. Lütfen uygulamadan anahtarı gir."
+                                "Bu sürüm OpenAI anahtarı olmadan derlenmiş, seni duyamıyorum."
                             } else if (!secureStore.hasDeepSeekKey()) {
-                                "DeepSeek API anahtarı ayarlanmadığı için cevap veremiyorum. Lütfen uygulamadan anahtarı gir."
+                                "Bu sürüm DeepSeek anahtarı olmadan derlenmiş, cevap veremiyorum."
                             } else {
                                 "Seni anlayamadım, tekrar dener misin?"
                             }
@@ -280,12 +309,20 @@ class AssistantForegroundService : Service() {
                     }
                     // Answer done → reopen the microphone for a follow-up command
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // e.g. the microphone refused to start — say so instead of going silent
+                Log.e(TAG, "session $generation failed", e)
+                DiagLog.event("Session", "$generation error ${DiagLog.describe(e)}")
+                runCatching { speak("Üzgünüm, bir sorun oluştu. Tekrar dener misin?") }
             } finally {
                 // A newer session may already own the shared state — leave it alone
                 if (sessionGeneration.get() == generation) {
                     abandonAudioFocus()
                     listening.set(false)
                     processing.set(false)
+                    sessionActive = false
                     currentChatId = null
                     if (!hadError) updateNotification(computeStatusText())
                     hadError = false
@@ -299,6 +336,7 @@ class AssistantForegroundService : Service() {
                     }
                 }
                 Log.i(TAG, "session $generation finished")
+                DiagLog.event("Session", "$generation finished")
             }
         }
     }
@@ -642,7 +680,7 @@ class AssistantForegroundService : Service() {
             suspendCancellableCoroutine<String?> { cont ->
                 pendingQuestion = cont
                 cont.invokeOnCancellation { if (pendingQuestion === cont) pendingQuestion = null }
-                serviceScope.launch { listenForPendingAnswer() }
+                pendingListenJob = serviceScope.launch { listenForPendingAnswer() }
             }
         }
         pendingQuestion = null
@@ -749,10 +787,14 @@ class AssistantForegroundService : Service() {
         phraseJob = null
         pendingQuestion?.let { if (it.isActive) it.cancel() }
         pendingQuestion = null
+        // The answer listener runs outside the session job; it must not keep the mic
+        pendingListenJob?.cancel()
+        pendingListenJob = null
         runCatching { openAiTts.stop() }
         runCatching { androidTts.stop() }
         listening.set(false)
         processing.set(false)
+        sessionActive = false
         conversation.clear()
         currentChatId = null
         OverlayService.hide(this)
@@ -887,7 +929,7 @@ class AssistantForegroundService : Service() {
     }
 
     private fun notifyStartupStatus() {
-        MessageListenerService.rebindIfNeeded(this)
+        runCatching { MessageListenerService.rebindIfNeeded(this) }
         startForegroundCompat(buildNotification(computeStatusText()))
     }
 
@@ -897,25 +939,85 @@ class AssistantForegroundService : Service() {
         if (!secureStore.hasDeepSeekKey()) missing.add("DeepSeek anahtarı (derleme)")
         if (!PermissionsHelper.hasMicrophone(this)) missing.add("mikrofon izni")
         if (!PermissionsHelper.hasOverlay(this)) missing.add("ekran üstü izni")
-        if (!PermissionsHelper.isAccessibilityEnabled(this)) missing.add("erişilebilirlik servisi")
+        if (!PermissionsHelper.isAccessibilityEnabled(this)) {
+            missing.add("erişilebilirlik servisi")
+        } else if (AccessibilitySvc.isStalled(this)) {
+            missing.add("erişilebilirlik servisi durdu, ayarlardan kapatıp açın")
+        }
         if (!PermissionsHelper.isNotificationListenerEnabled(this)) missing.add("bildirim erişimi")
         return if (missing.isEmpty()) "Dinlemede..." else "Eksik: ${missing.joinToString(", ")}"
     }
 
+    /**
+     * Never throws. A failed startForeground used to crash onCreate, and every crash
+     * also knocks out the accessibility service (power gesture) until it is toggled.
+     * Android 14+ uses specialUse: dataSync is capped at 6 h/day on Android 15, and the
+     * always-on service crashed daily when the cap ran out. The microphone type is
+     * tried first and dropped when Android refuses it from the background.
+     */
     private fun startForegroundCompat(notification: Notification) {
-        when {
-            Build.VERSION.SDK_INT >= 30 -> {
-                var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-                if (PermissionsHelper.hasMicrophone(this)) {
-                    type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-                }
-                startForeground(NOTIFICATION_ID, notification, type)
-            }
-            Build.VERSION.SDK_INT == 29 ->
-                startForeground(NOTIFICATION_ID, notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-            else -> startForeground(NOTIFICATION_ID, notification)
+        if (Build.VERSION.SDK_INT < 29) {
+            runCatching { startForeground(NOTIFICATION_ID, notification) }
+                .onFailure { DiagLog.event("Service", "startForeground failed ${DiagLog.describe(it)}") }
+            return
         }
+        val base = if (Build.VERSION.SDK_INT >= 34) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+        } else {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        }
+        val attempts = if (Build.VERSION.SDK_INT >= 30 && PermissionsHelper.hasMicrophone(this)) {
+            listOf(base or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE, base)
+        } else {
+            listOf(base)
+        }
+        for (type in attempts) {
+            try {
+                startForeground(NOTIFICATION_ID, notification, type)
+                if (type != lastFgsType) {
+                    lastFgsType = type
+                    DiagLog.event("Service", "foreground type=0x${Integer.toHexString(type)}")
+                }
+                return
+            } catch (e: Exception) {
+                Log.w(TAG, "startForeground type=0x${Integer.toHexString(type)} failed", e)
+                DiagLog.event("Service", "startForeground 0x${Integer.toHexString(type)} failed ${DiagLog.describe(e)}")
+            }
+        }
+    }
+
+    /** Safety net: only time-limited types (dataSync on Android 15) get here. Stop instead of crashing. */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        DiagLog.event("Service", "onTimeout type=0x${Integer.toHexString(fgsType)}")
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+        stopSelf()
+    }
+
+    /**
+     * The power gesture lives in the accessibility service. When it is off or has
+     * stalled (Android doesn't rebind a crashed one) only the long-press still works,
+     * so tell the user once in a while — the helper has to toggle it in Settings.
+     */
+    /** Gives a just-launched panel a moment to come up; never waits long. */
+    private suspend fun awaitPanel() {
+        val deadline = SystemClock.elapsedRealtime() + PANEL_WAIT_MS
+        while (!SessionActivity.isShowing() && SystemClock.elapsedRealtime() < deadline) {
+            delay(50)
+        }
+    }
+
+    private suspend fun warnIfPowerTriggerBroken() {
+        val broken = !PermissionsHelper.isAccessibilityEnabled(this) || AccessibilitySvc.isStalled(this)
+        if (!broken) return
+        val prefs = getSharedPreferences(STATE_PREFS, Context.MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+        if (now - prefs.getLong(KEY_A11Y_WARNED_AT, 0L) < A11Y_WARN_INTERVAL_MS) return
+        prefs.edit().putLong(KEY_A11Y_WARNED_AT, now).apply()
+        DiagLog.event("Session", "spoke accessibility warning")
+        speak(
+            "Bilgin olsun, güç tuşuyla açma şu an çalışmıyor. Bir yakının telefonun " +
+                "erişilebilirlik ayarlarında deepAssist'i kapatıp tekrar açmalı."
+        )
     }
 
     private fun buildNotification(text: String): Notification {
@@ -982,7 +1084,9 @@ class AssistantForegroundService : Service() {
     // ==================================================================
 
     override fun onDestroy() {
+        DiagLog.event("Service", "onDestroy")
         AccessibilitySvc.onPowerKeyDetected = null
+        AccessibilitySvc.onStateChanged = null
         screenOffReceiver?.let { runCatching { unregisterReceiver(it) } }
         screenOffReceiver = null
         pendingQuestion?.let { if (it.isActive) it.cancel() }
@@ -1015,6 +1119,15 @@ class AssistantForegroundService : Service() {
 
         @Volatile
         private var lastToolFinishedAt = 0L
+
+        /** True from a trigger until that session ends — the panel's launch fallback checks it. */
+        @Volatile
+        var sessionActive = false
+
+        private const val STATE_PREFS = "deepassist_state"
+        private const val KEY_A11Y_WARNED_AT = "a11y_warned_at"
+        private const val A11Y_WARN_INTERVAL_MS = 6 * 60 * 60 * 1000L
+        private const val PANEL_WAIT_MS = 600L
 
         /** Set by SessionActivity when an app opened by a tool took over the screen. */
         @Volatile
@@ -1062,15 +1175,20 @@ class AssistantForegroundService : Service() {
             }
         }
 
-        fun trigger(context: Context, action: String) {
+        /** @return false when Android refused to start the service (e.g. from the background). */
+        fun trigger(context: Context, action: String): Boolean =
             runCatching {
                 context.startForegroundService(
                     Intent(context, AssistantForegroundService::class.java)
                         .apply { this.action = action }
                 )
-            }.onFailure { Log.w(TAG, "trigger $action failed", it) }
-        }
+            }.onFailure {
+                Log.w(TAG, "trigger $action failed", it)
+                DiagLog.event("Trigger", "${action.substringAfterLast('.')} start failed ${DiagLog.describe(it)}")
+            }.isSuccess
 
-        fun endSession(context: Context) = trigger(context, ACTION_END_SESSION)
+        fun endSession(context: Context) {
+            trigger(context, ACTION_END_SESSION)
+        }
     }
 }

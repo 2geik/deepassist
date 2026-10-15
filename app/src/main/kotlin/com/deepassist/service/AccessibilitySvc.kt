@@ -9,7 +9,11 @@ import android.content.IntentFilter
 import android.os.Build
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
+import com.deepassist.DeepAssistApp
+import com.deepassist.SessionActivity
 import com.deepassist.data.NotificationInfo
+import com.deepassist.util.DiagLog
+import com.deepassist.util.PermissionsHelper
 import java.util.concurrent.ConcurrentLinkedQueue
 
 /** Process-wide cache of recent notifications captured by the accessibility service. */
@@ -58,7 +62,9 @@ class AccessibilitySvc : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        DiagLog.event("A11y", "connected")
         registerScreenReceiver()
+        onStateChanged?.invoke()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -124,11 +130,20 @@ class AccessibilitySvc : AccessibilityService() {
                         if (lastScreenOff > 0 && elapsed < POWER_GESTURE_WINDOW_MS) {
                             val callback = onPowerKeyDetected
                             if (callback != null) {
+                                DiagLog.event("Trigger", "power gesture")
                                 callback.invoke()
                             } else {
-                                // Orchestrator not running yet — start it with the power trigger
-                                runCatching {
-                                    AssistantForegroundService.trigger(
+                                // Orchestrator not running — start it with the power trigger. If
+                                // Android refuses a background service start, open the panel
+                                // first (allowed for an accessibility service); the panel then
+                                // starts the service from the foreground.
+                                DiagLog.event("Trigger", "power gesture, service not running")
+                                val started = AssistantForegroundService.trigger(
+                                    this@AccessibilitySvc,
+                                    AssistantForegroundService.ACTION_POWER_TRIGGER
+                                )
+                                if (!started) {
+                                    SessionActivity.bootstrap(
                                         this@AccessibilitySvc,
                                         AssistantForegroundService.ACTION_POWER_TRIGGER
                                     )
@@ -148,9 +163,11 @@ class AccessibilitySvc : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        DiagLog.event("A11y", "destroyed")
         screenReceiver?.let { runCatching { unregisterReceiver(it) } }
         screenReceiver = null
         if (instance === this) instance = null
+        onStateChanged?.invoke()
         super.onDestroy()
     }
 
@@ -162,6 +179,23 @@ class AccessibilitySvc : AccessibilityService() {
 
         @Volatile
         var onPowerKeyDetected: (() -> Unit)? = null
+
+        /** Connected/destroyed — lets the service refresh its status line. */
+        @Volatile
+        var onStateChanged: (() -> Unit)? = null
+
+        /** How long after process start the system normally needs to bind the service. */
+        const val CONNECT_GRACE_MS = 15_000L
+
+        /**
+         * Enabled in Settings but not running in this process. After a crash or a
+         * HyperOS kill Android lists the service as "crashed" and never rebinds it, so
+         * the power gesture is dead until someone toggles it off and on.
+         */
+        fun isStalled(context: Context): Boolean =
+            instance == null &&
+                PermissionsHelper.isAccessibilityEnabled(context) &&
+                SystemClock.elapsedRealtime() - DeepAssistApp.processStartedAt > CONNECT_GRACE_MS
 
         /**
          * Polls the active window until a clickable node whose text or content

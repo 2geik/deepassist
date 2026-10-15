@@ -49,6 +49,9 @@ fun SettingsScreen(
     val hasCallLog = remember(refreshTick) { PermissionsHelper.hasCallLog(context) }
     val hasOverlay = remember(refreshTick) { PermissionsHelper.hasOverlay(context) }
     val hasAccessibility = remember(refreshTick) { PermissionsHelper.isAccessibilityEnabled(context) }
+    val accessibilityStalled = remember(refreshTick) {
+        com.deepassist.service.AccessibilitySvc.isStalled(context)
+    }
     val ignoresBattery = remember(refreshTick) { PermissionsHelper.isIgnoringBatteryOptimizations(context) }
 
     Column(
@@ -124,8 +127,12 @@ fun SettingsScreen(
         )
         PermissionRow(
             title = "Erişilebilirlik servisi",
-            subtitle = "Bildirim okuma ve güç tuşu tetikleme için",
-            granted = hasAccessibility,
+            subtitle = if (accessibilityStalled) {
+                "Servis durmuş: listede deepAssist'i kapatıp tekrar açın"
+            } else {
+                "Bildirim okuma ve güç tuşu tetikleme için"
+            },
+            granted = hasAccessibility && !accessibilityStalled,
             onRequest = {
                 runCatching {
                     context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))

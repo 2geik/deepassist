@@ -12,6 +12,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.INTERNET" />
@@ -74,10 +75,16 @@
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:theme="@style/Theme.DeepAssist.Session" />
 
+        <!-- specialUse on Android 14+: dataSync is capped at 6 h/day on Android 15 and
+             the always-on assistant crashed when the cap ran out. dataSync stays for 11–13. -->
         <service
             android:name=".service.AssistantForegroundService"
             android:exported="false"
-            android:foregroundServiceType="microphone|dataSync" />
+            android:foregroundServiceType="microphone|dataSync|specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Always-on voice assistant for a blind user: listens for the power-button gesture and runs spoken sessions" />
+        </service>
 
         <service
             android:name=".service.AccessibilitySvc"

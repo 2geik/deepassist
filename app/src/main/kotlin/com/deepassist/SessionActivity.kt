@@ -28,6 +28,8 @@ import android.widget.TextView
 import com.deepassist.service.AssistantForegroundService
 import com.deepassist.service.ChatSession
 import com.deepassist.service.OverlayAnchor
+import com.deepassist.util.DiagLog
+import com.deepassist.util.PermissionsHelper
 
 /**
  * Bottom-sheet style session UI: a transparent full-screen activity hosting
@@ -70,6 +72,21 @@ class SessionActivity : Activity() {
 
         ChatSession.setListener { runOnUiThread { render() } }
         render()
+        DiagLog.event("Panel", "created")
+        handleBootstrap(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleBootstrap(intent)
+    }
+
+    /** Opened by a trigger whose background service start was refused: start it from here. */
+    private fun handleBootstrap(intent: Intent?) {
+        val action = intent?.getStringExtra(EXTRA_BOOTSTRAP_ACTION) ?: return
+        intent.removeExtra(EXTRA_BOOTSTRAP_ACTION)
+        DiagLog.event("Panel", "bootstrap ${action.substringAfterLast('.')}")
+        AssistantForegroundService.trigger(this, action)
     }
 
     /** HOME press (or recents gesture) while the panel is up ends the session. */
@@ -423,6 +440,53 @@ class SessionActivity : Activity() {
         @Volatile
         private var launchPending = false
 
+        private const val EXTRA_BOOTSTRAP_ACTION = "bootstrap_action"
+
+        /** How long a launch may take before the full-screen-intent fallback kicks in. */
+        private const val LAUNCH_CHECK_MS = 1_500L
+
+        /** The panel is on screen (created, not finishing, not covered). */
+        fun isShowing(): Boolean {
+            val current = instance ?: return false
+            return !current.isFinishing && !current.inBackground
+        }
+
+        /**
+         * Opens the panel straight away and lets it start the service from the
+         * foreground. Used when Android refuses a background service start; callers
+         * are system-bound services (accessibility, voice interaction), which may
+         * start activities from the background.
+         */
+        fun bootstrap(context: Context, action: String) {
+            DiagLog.event("Panel", "bootstrap launch ${action.substringAfterLast('.')}")
+            runCatching { context.startActivity(bootstrapIntent(context, action)) }
+                .onFailure { DiagLog.event("Panel", "bootstrap failed ${DiagLog.describe(it)}") }
+        }
+
+        fun bootstrapIntent(context: Context, action: String): Intent =
+            Intent(context, SessionActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                .putExtra(EXTRA_BOOTSTRAP_ACTION, action)
+
+        /**
+         * A blocked background activity start fails silently. If the panel still isn't
+         * up after [LAUNCH_CHECK_MS] while the session runs, post the full-screen
+         * intent: it opens the panel on the lock screen and shows a tappable
+         * heads-up notification otherwise.
+         */
+        private fun verifyLaunch(app: Context, path: String) {
+            Handler(Looper.getMainLooper()).postDelayed({
+                if (isShowing() || relaunchSuppressed || !AssistantForegroundService.sessionActive) {
+                    return@postDelayed
+                }
+                DiagLog.event(
+                    "Panel",
+                    "not visible after $path launch (fsi=${PermissionsHelper.canUseFullScreenIntent(app)})"
+                )
+                postFullScreenNotification(app)
+            }, LAUNCH_CHECK_MS)
+        }
+
         /**
          * Brings the session UI up if it is not already showing.
          *
@@ -448,10 +512,12 @@ class SessionActivity : Activity() {
                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     )
                 }
-                // Fall back to silent full-screen-intent after a short grace period
+                // Fall back to silent full-screen-intent after a short grace period. A panel
+                // that started but stays hidden behind the keyguard counts as not shown.
                 Handler(Looper.getMainLooper()).postDelayed({
-                    if (instance == null) postFullScreenNotification(app)
+                    if (!isShowing()) postFullScreenNotification(app)
                 }, 400L)
+                verifyLaunch(app, "keyguard")
                 return
             }
 
@@ -466,11 +532,15 @@ class SessionActivity : Activity() {
                             Intent(app, SessionActivity::class.java)
                                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         )
-                    }.onFailure { android.util.Log.w("SessionActivity", "panel launch failed", it) }
+                    }.onFailure {
+                        android.util.Log.w("SessionActivity", "panel launch failed", it)
+                        DiagLog.event("Panel", "launch failed ${DiagLog.describe(it)}")
+                    }
                 } finally {
                     launchPending = false
                 }
             }, ANCHOR_SETTLE_MS)
+            verifyLaunch(app, "anchor")
         }
 
         fun close() {
