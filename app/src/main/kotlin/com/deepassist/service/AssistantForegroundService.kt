@@ -145,7 +145,7 @@ class AssistantForegroundService : Service() {
         toolRegistry = ToolRegistry({ question -> askUser(question) }, deepSeek)
         Tool.playEarcon = { earcons.play(it) }
         Tool.say = { text -> awaitPhrase(); speak(text) }
-        Tool.sayQuick = { text -> serviceScope.launch { androidTts.speak(text) } }
+        Tool.sayQuick = { text -> androidTts.speak(text, volume = CUE_VOLUME) }
         toolRegistry.initialize(this)
         chatHistory = ChatHistoryStore.get(this)
 
@@ -1166,6 +1166,9 @@ class AssistantForegroundService : Service() {
         private const val KEY_A11Y_WARNED_AT = "a11y_warned_at"
         private const val A11Y_WARN_INTERVAL_MS = 6 * 60 * 60 * 1000L
         private const val PANEL_WAIT_MS = 600L
+
+        /** Framing cues use the fast on-device voice; quieter so they don't startle. */
+        private const val CUE_VOLUME = 0.6f
 
         /** Set by SessionActivity when an app opened by a tool took over the screen. */
         @Volatile

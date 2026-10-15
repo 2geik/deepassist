@@ -11,7 +11,6 @@ import com.deepassist.data.ToolProperty
 import com.deepassist.data.ToolResult
 import com.deepassist.llm.DeepSeekClient
 import com.deepassist.service.AccessibilitySvc
-import com.deepassist.service.AssistantForegroundService
 import com.deepassist.speech.Earcons
 import com.google.gson.JsonObject
 import kotlinx.coroutines.Dispatchers
@@ -62,10 +61,9 @@ class UsePhoneTool(private val deepSeek: DeepSeekClient) : Tool() {
             "deepassist:agent"
         )
         runCatching { screenLock?.acquire(timeoutMs) }
+        // The panel stays away after the run too, so the screen the agent reached stays
+        // visible; the conversation goes on by voice (the mic reopens for a follow-up)
         PanelControl.stepAside()
-        // The app the agent leaves open belongs to the user now: when the session
-        // speaks the result it must not pull the panel over it or reopen the mic
-        AssistantForegroundService.uiHandedOff = true
         try {
             val agent = ScreenAgent(
                 context = context,

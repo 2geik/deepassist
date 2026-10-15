@@ -38,6 +38,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -102,7 +103,7 @@ fun SessionPanel(
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
-                onClickLabel = "Asistanı kapat"
+                onClickLabel = "Paneli küçült"
             ) { onOutsideTap() }
     ) {
         Surface(
@@ -141,8 +142,18 @@ fun SessionPanel(
                         text = label.orEmpty(),
                         style = MaterialTheme.typography.titleSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 2
+                        maxLines = 2,
+                        modifier = Modifier.weight(1f)
                     )
+                    if (!expanded) {
+                        IconButton(onClick = onEnd) {
+                            Icon(
+                                Icons.Outlined.Close,
+                                contentDescription = "Asistanı kapat",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 }
 
                 Transcript(

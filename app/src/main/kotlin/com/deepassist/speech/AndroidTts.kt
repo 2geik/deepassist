@@ -47,8 +47,8 @@ class AndroidTts(context: Context) {
         }.also { it.setOnUtteranceProgressListener(listener) }
     }
 
-    /** Synthesizes and plays [text] on-device; returns when playback finishes. */
-    suspend fun speak(text: String): Boolean {
+    /** Synthesizes and plays [text] on-device; returns when playback finishes. [volume] is 0..1. */
+    suspend fun speak(text: String, volume: Float = 1f): Boolean {
         if (text.isBlank()) return false
         // Engine binding can silently never complete on some ROMs
         if (withTimeoutOrNull(INIT_TIMEOUT_MS) { ready.await() } != true) return false
@@ -61,7 +61,10 @@ class AndroidTts(context: Context) {
                 pending.remove(utteranceId)
                 runCatching { engine.stop() }
             }
-            val queued = engine.speak(text.take(4000), TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+            val params = if (volume < 1f) {
+                android.os.Bundle().apply { putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, volume.coerceIn(0f, 1f)) }
+            } else null
+            val queued = engine.speak(text.take(4000), TextToSpeech.QUEUE_FLUSH, params, utteranceId)
             if (queued == TextToSpeech.ERROR) finish(utteranceId, false)
         }
     }

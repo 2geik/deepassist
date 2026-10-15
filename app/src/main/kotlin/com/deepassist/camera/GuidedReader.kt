@@ -28,8 +28,16 @@ object GuidedReader {
     private const val TAG = "CameraGuide"
     private const val MAX_MS = 35_000L
     private const val GOOD_FRAMES = 3
-    private const val SPEAK_GAP_MS = 1_800L
-    private const val REPEAT_GAP_MS = 3_500L
+
+    /** A cue is only spoken once the same advice held for this many frames (~1 s). */
+    private const val STABLE_FRAMES = 3
+
+    /** Quiet time after a cue ends before the next one; longer before repeating it. */
+    private const val SPEAK_GAP_MS = 3_000L
+    private const val REPEAT_GAP_MS = 5_000L
+
+    /** Saying the opposite direction this soon after means the hand is overshooting. */
+    private const val FLIP_WINDOW_MS = 8_000L
 
     private class Frame(val advice: FramingGuide.Advice, val brightness: Int)
 
@@ -37,7 +45,7 @@ object GuidedReader {
      * @param cue speaks one short instruction right away (low-latency voice).
      * @return the photo and whether the text was framed before the time ran out.
      */
-    suspend fun capture(context: Context, cue: (String) -> Unit): Pair<CameraCapture.Result, Boolean> {
+    suspend fun capture(context: Context, cue: suspend (String) -> Unit): Pair<CameraCapture.Result, Boolean> {
         val panel = CameraCapture.preparePanel(context)
             ?: return CameraCapture.Result.Failed("Kamerayı açamadım, ekranı açıp tekrar dener misin?") to false
         val rotation = CameraCapture.currentRotation(context)
@@ -65,6 +73,8 @@ object GuidedReader {
             var good = 0
             var lastSpoken: FramingGuide.Advice? = null
             var lastSpokenAt = SystemClock.elapsedRealtime()
+            var pending: FramingGuide.Advice? = null
+            var pendingFrames = 0
             withTimeoutOrNull(MAX_MS) {
                 for (frame in frames) {
                     if (!torchOn && frame.brightness < 50 && SystemClock.elapsedRealtime() - started > 800) {
@@ -75,6 +85,7 @@ object GuidedReader {
                         continue
                     }
                     if (frame.advice == FramingGuide.Advice.GOOD) {
+                        pending = null
                         if (++good >= GOOD_FRAMES) {
                             framed = true
                             break
@@ -82,14 +93,29 @@ object GuidedReader {
                         continue
                     }
                     good = 0
+                    // Ignore a passing wobble of the hand: only advice that holds counts
+                    if (frame.advice == pending) pendingFrames++ else {
+                        pending = frame.advice
+                        pendingFrames = 1
+                    }
+                    if (pendingFrames < STABLE_FRAMES) continue
+
                     val now = SystemClock.elapsedRealtime()
-                    val text = frame.advice.spoken ?: continue
-                    val gap = if (frame.advice == lastSpoken) REPEAT_GAP_MS else SPEAK_GAP_MS
+                    var advice = frame.advice
+                    // Left then right (or up then down) in quick succession: the text is wider
+                    // than the view, so stepping back helps more than another turn
+                    if (opposite(advice, lastSpoken) && now - lastSpokenAt < FLIP_WINDOW_MS) {
+                        advice = FramingGuide.Advice.TOO_CLOSE
+                    }
+                    val text = advice.spoken ?: continue
+                    val gap = if (advice == lastSpoken) REPEAT_GAP_MS else SPEAK_GAP_MS
                     if (now - lastSpokenAt >= gap) {
-                        Log.i(TAG, "cue ${frame.advice}")
+                        Log.i(TAG, "cue $advice")
                         cue(text)
-                        lastSpoken = frame.advice
-                        lastSpokenAt = now
+                        lastSpoken = advice
+                        // Measured from the end of the cue, so cues never run into each other
+                        lastSpokenAt = SystemClock.elapsedRealtime()
+                        pending = null
                     }
                 }
             }
@@ -108,6 +134,14 @@ object GuidedReader {
             worker.shutdown()
             recognizer.close()
         }
+    }
+
+    private fun opposite(a: FramingGuide.Advice, b: FramingGuide.Advice?): Boolean = when (a) {
+        FramingGuide.Advice.TURN_LEFT -> b == FramingGuide.Advice.TURN_RIGHT
+        FramingGuide.Advice.TURN_RIGHT -> b == FramingGuide.Advice.TURN_LEFT
+        FramingGuide.Advice.MOVE_UP -> b == FramingGuide.Advice.MOVE_DOWN
+        FramingGuide.Advice.MOVE_DOWN -> b == FramingGuide.Advice.MOVE_UP
+        else -> false
     }
 
     @androidx.annotation.OptIn(androidx.camera.core.ExperimentalGetImage::class)

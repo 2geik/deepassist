@@ -33,7 +33,7 @@ import com.deepassist.util.PermissionsHelper
  * TYPE_APPLICATION_OVERLAY window, which Android hides on the keyguard) it can
  * show over the lock screen via setShowWhenLocked, wake the display via
  * setTurnScreenOn, and keep the screen on for the whole session via
- * FLAG_KEEP_SCREEN_ON. Tapping outside the panel ends the assistant session.
+ * FLAG_KEEP_SCREEN_ON. Tapping outside only collapses it; the X button ends the session.
  */
 class SessionActivity : ComponentActivity() {
 
@@ -76,7 +76,10 @@ class SessionActivity : ComponentActivity() {
                     expanded = expanded.value,
                     onExpand = { expanded.value = true },
                     onCollapse = { expanded.value = false },
-                    onOutsideTap = { if (expanded.value) expanded.value = false else endSessionAndFinish() },
+                    // Never ends the session: a palm or finger holding the phone (often while
+                    // the panel wakes the screen) used to close it. The X, back, power and
+                    // "kapat" still do.
+                    onOutsideTap = { if (expanded.value) expanded.value = false },
                     onEnd = { endSessionAndFinish() }
                 )
             }
@@ -141,7 +144,7 @@ class SessionActivity : ComponentActivity() {
         entries.value = ChatSession.snapshot()
         hideHandler.removeCallbacksAndMessages(null)
         // The service closes the panel explicitly when the conversation ends
-        // (farewell, silence, error, outside tap, home/back/power). This timer
+        // (farewell, silence, error, X button, home/back/power). This timer
         // is only a safety net for a session that died without cleanup.
         hideHandler.postDelayed({ finish() }, SAFETY_TIMEOUT_MS)
     }
