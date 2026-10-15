@@ -1,6 +1,9 @@
 package com.deepassist.tools
 
 import com.deepassist.camera.CameraCapture
+import com.deepassist.camera.GuidedReader
+import com.deepassist.data.SecureStore
+import com.deepassist.util.PermissionsHelper
 import com.deepassist.camera.LastPhoto
 import com.deepassist.data.ToolProperty
 import com.deepassist.data.ToolResult
@@ -29,8 +32,10 @@ class CameraLookTool(private val deepSeek: DeepSeekClient) : Tool() {
         ),
         "mode" to ToolProperty(
             type = "string",
-            description = "describe: etrafı/nesneyi anlat. read_text: yazıyı oku. money: parayı say.",
-            enum = listOf("describe", "read_text", "money")
+            description = "describe: etrafı/nesneyi anlat. read_text: kısa bir yazıyı (etiket, tabela, kutu) hemen oku. " +
+                "guide_read: belge, fatura, mektup, ilaç prospektüsü gibi bir sayfayı okurken kullanıcıyı " +
+                "'sola çevir, yaklaştır' diye yönlendirip yazı tam görününce oku. money: parayı say.",
+            enum = listOf("describe", "read_text", "guide_read", "money")
         ),
         "use_last_photo" to ToolProperty(
             type = "boolean",
@@ -40,7 +45,8 @@ class CameraLookTool(private val deepSeek: DeepSeekClient) : Tool() {
     )
     override val required = listOf("question")
     override val thinkingPhrase = "Bakıyorum..."
-    override val timeoutMs = 30_000L
+    // Guided reading may take up to ~35 s of hand guidance plus the read
+    override val timeoutMs = 60_000L
 
     override suspend fun execute(args: JsonObject): ToolResult {
         val question = args.optString("question")?.trim().orEmpty().ifBlank { "Önümde ne var?" }
@@ -51,7 +57,18 @@ class CameraLookTool(private val deepSeek: DeepSeekClient) : Tool() {
         var qualityNote = ""
         try {
             if (jpeg == null) {
-                when (val shot = CameraCapture.capture(context)) {
+                val guided = mode == "guide_read" && SecureStore(context).framingGuideEnabled
+                if (guided && !PermissionsHelper.hasCamera(context)) {
+                    return spoken(false, "Kamera izni verilmemiş. Bir yakının deepAssist ayarlarından kamera iznini açmalı.")
+                }
+                val shot = if (guided) {
+                    val (result, framed) = GuidedReader.capture(context) { cue -> sayQuick?.invoke(cue) }
+                    if (!framed) qualityNote += "\n(Not: Kullanıcı yazıyı tam kadraja oturtamadı; okuyabildiğini oku, eksik yeri söyle.)"
+                    result
+                } else {
+                    CameraCapture.capture(context)
+                }
+                when (shot) {
                     is CameraCapture.Result.Failed -> return spoken(false, shot.spoken)
                     is CameraCapture.Result.Photo -> {
                         playEarcon?.invoke(Earcons.Sound.SHUTTER)
@@ -65,7 +82,7 @@ class CameraLookTool(private val deepSeek: DeepSeekClient) : Tool() {
                         }
                         jpeg = shot.jpeg
                         LastPhoto.set(shot.jpeg)
-                        qualityNote = when {
+                        qualityNote += when {
                             shot.quality.dark && shot.quality.blurry -> "\n(Not: Görüntü karanlık ve bulanık görünüyor.)"
                             shot.quality.dark -> "\n(Not: Görüntü karanlık görünüyor.)"
                             shot.quality.blurry -> "\n(Not: Görüntü bulanık görünüyor.)"
@@ -101,7 +118,7 @@ class CameraLookTool(private val deepSeek: DeepSeekClient) : Tool() {
         ToolResult(success = ok, data = if (ok) text else "", error = if (ok) null else text, speakDirectly = true)
 
     private fun modeHint(mode: String) = when (mode) {
-        "read_text" -> "Fotoğraftaki yazıyı oku."
+        "read_text", "guide_read" -> "Fotoğraftaki yazıyı oku."
         "money" -> "Fotoğraftaki parayı say: her banknot ve madeni paranın değerini ve toplamı söyle."
         else -> "Fotoğrafta ne olduğunu anlat."
     }

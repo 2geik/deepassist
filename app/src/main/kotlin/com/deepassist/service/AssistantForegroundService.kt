@@ -144,6 +144,7 @@ class AssistantForegroundService : Service() {
         toolRegistry = ToolRegistry({ question -> askUser(question) }, deepSeek)
         Tool.playEarcon = { earcons.play(it) }
         Tool.say = { text -> awaitPhrase(); speak(text) }
+        Tool.sayQuick = { text -> serviceScope.launch { androidTts.speak(text) } }
         toolRegistry.initialize(this)
         chatHistory = ChatHistoryStore.get(this)
 

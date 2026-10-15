@@ -50,6 +50,7 @@ fun SettingsScreen(
 ) {
     val context = LocalContext.current
     var voiceEnabled by remember { mutableStateOf(secureStore.voiceResponseEnabled) }
+    var framingGuide by remember { mutableStateOf(secureStore.framingGuideEnabled) }
 
     val hasRuntime = remember(refreshTick) { PermissionsHelper.hasAllRuntimePermissions(context) }
     val hasCallLog = remember(refreshTick) { PermissionsHelper.hasCallLog(context) }
@@ -87,6 +88,31 @@ fun SettingsScreen(
                     onCheckedChange = {
                         voiceEnabled = it
                         secureStore.voiceResponseEnabled = it
+                    }
+                )
+            }
+        }
+
+        SectionCard(title = "Kamera") {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Okurken yönlendir", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "Belge okurken \"biraz sola çevir, yaklaştır\" diye tarif eder, yazı tam görününce okur",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = framingGuide,
+                    onCheckedChange = {
+                        framingGuide = it
+                        secureStore.framingGuideEnabled = it
                     }
                 )
             }

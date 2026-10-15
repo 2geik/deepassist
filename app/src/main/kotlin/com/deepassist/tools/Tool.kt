@@ -56,6 +56,10 @@ abstract class Tool {
         @Volatile
         var say: (suspend (String) -> Unit)? = null
 
+        /** Set by the service: speaks a cue at once on the on-device voice, cutting off the previous one. */
+        @Volatile
+        var sayQuick: ((String) -> Unit)? = null
+
         /** Set by the service: plays a feedback sound (shutter, agent step). */
         @Volatile
         var playEarcon: ((com.deepassist.speech.Earcons.Sound) -> Unit)? = null

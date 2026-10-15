@@ -27,6 +27,11 @@ android {
         versionCode = 3
         versionName = "2.0-dev"
 
+        // Phones only: CameraX and ML Kit ship native code for every ABI otherwise
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
+
         buildConfigField(
             "String", "DEEPSEEK_API_KEY",
             envBuildConfigString("DEEPSEEK_API_KEY")
@@ -78,6 +83,8 @@ dependencies {
     implementation("androidx.camera:camera-core:1.6.2")
     implementation("androidx.camera:camera-camera2:1.6.2")
     implementation("androidx.camera:camera-lifecycle:1.6.2")
+    // Bundled Latin text model: works offline and without a first-use download
+    implementation("com.google.mlkit:text-recognition:16.0.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     implementation("androidx.core:core-ktx:1.15.0")

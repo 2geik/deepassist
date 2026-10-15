@@ -30,6 +30,11 @@ class SecureStore(context: Context) {
 
     val tavilyApiKey: String get() = BuildConfig.TAVILY_API_KEY
 
+    /** Reading documents with the camera first guides the hand ("biraz sola çevir"). */
+    var framingGuideEnabled: Boolean
+        get() = prefs.getBoolean(KEY_FRAMING_GUIDE, true)
+        set(value) = prefs.edit().putBoolean(KEY_FRAMING_GUIDE, value).apply()
+
     var voiceResponseEnabled: Boolean
         get() = prefs.getBoolean(KEY_VOICE_RESPONSE, true)
         set(value) = prefs.edit().putBoolean(KEY_VOICE_RESPONSE, value).apply()
@@ -40,5 +45,6 @@ class SecureStore(context: Context) {
 
     companion object {
         private const val KEY_VOICE_RESPONSE = "voice_response_enabled"
+        private const val KEY_FRAMING_GUIDE = "framing_guide_enabled"
     }
 }

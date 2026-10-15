@@ -55,16 +55,12 @@ object CameraCapture {
         if (!PermissionsHelper.hasCamera(context)) {
             return Result.Failed("Kamera izni verilmemiş. Bir yakının deepAssist ayarlarından kamera iznini açmalı.")
         }
-        val panel = awaitPanel(context)
+        val panel = preparePanel(context)
             ?: return Result.Failed("Kamerayı açamadım, ekranı açıp tekrar dener misin?")
 
         val rotation = currentRotation(context)
         val provider = cameraProvider(context)
-        val capture = ImageCapture.Builder()
-            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-            .setFlashMode(ImageCapture.FLASH_MODE_AUTO)
-            .setTargetRotation(rotation)
-            .build()
+        val capture = newImageCapture(rotation)
         return try {
             withContext(Dispatchers.Main) {
                 provider.unbindAll()
@@ -72,22 +68,42 @@ object CameraCapture {
             }
             // Let exposure and focus settle; the first frames are often dark or soft
             delay(SETTLE_MS)
-            val started = System.currentTimeMillis()
-            val image = takePicture(context, capture)
-            val photo = try {
-                withContext(Dispatchers.Default) { toUprightJpeg(image) }
-            } finally {
-                image.close()
-            }
-            Log.i(TAG, "captured ${photo.jpeg.size / 1024} KB in ${System.currentTimeMillis() - started} ms, " +
-                "brightness=${photo.quality.brightness} sharpness=${"%.0f".format(photo.quality.sharpness)}")
-            photo
+            shoot(context, capture)
         } catch (e: Exception) {
             Log.w(TAG, "capture failed: ${e.javaClass.simpleName} ${e.message}")
             Result.Failed("Fotoğraf çekemedim, kamera şu an kullanılamıyor olabilir.")
         } finally {
             withContext(Dispatchers.Main) { runCatching { provider.unbind(capture) } }
         }
+    }
+
+    fun newImageCapture(rotation: Int): ImageCapture = ImageCapture.Builder()
+        .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+        .setFlashMode(ImageCapture.FLASH_MODE_AUTO)
+        .setTargetRotation(rotation)
+        .build()
+
+    /** Takes the picture on an already bound [capture] and makes the upright in-memory JPEG. */
+    suspend fun shoot(context: Context, capture: ImageCapture): Result = try {
+        val started = System.currentTimeMillis()
+        val image = takePicture(context, capture)
+        val photo = try {
+            withContext(Dispatchers.Default) { toUprightJpeg(image) }
+        } finally {
+            image.close()
+        }
+        Log.i(TAG, "captured ${photo.jpeg.size / 1024} KB in ${System.currentTimeMillis() - started} ms, " +
+            "brightness=${photo.quality.brightness} sharpness=${"%.0f".format(photo.quality.sharpness)}")
+        photo
+    } catch (e: Exception) {
+        Log.w(TAG, "shoot failed: ${e.javaClass.simpleName} ${e.message}")
+        Result.Failed("Fotoğraf çekemedim, kamera şu an kullanılamıyor olabilir.")
+    }
+
+    /** Camera permission plus a visible panel, which is the camera's lifecycle owner. */
+    suspend fun preparePanel(context: Context): SessionActivity? {
+        if (!PermissionsHelper.hasCamera(context)) return null
+        return awaitPanel(context)
     }
 
     /** The panel is the camera's lifecycle owner; bring it up if it is hidden. */
@@ -104,7 +120,7 @@ object CameraCapture {
         }
     }
 
-    private suspend fun cameraProvider(context: Context): ProcessCameraProvider =
+    suspend fun cameraProvider(context: Context): ProcessCameraProvider =
         suspendCancellableCoroutine { cont ->
             val future = ProcessCameraProvider.getInstance(context)
             future.addListener({
@@ -134,7 +150,7 @@ object CameraCapture {
      * How the phone is physically held, so a document held sideways comes out
      * upright. The panel stays portrait, so the display rotation can't tell.
      */
-    private suspend fun currentRotation(context: Context): Int = withContext(Dispatchers.Main) {
+    suspend fun currentRotation(context: Context): Int = withContext(Dispatchers.Main) {
         val reading = CompletableDeferred<Int>()
         val listener = object : OrientationEventListener(context) {
             override fun onOrientationChanged(orientation: Int) {
