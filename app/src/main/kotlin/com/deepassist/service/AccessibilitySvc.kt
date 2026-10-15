@@ -62,13 +62,24 @@ class AccessibilitySvc : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        DiagLog.event("A11y", "connected")
+        val caps = serviceInfo?.capabilities ?: 0
+        DiagLog.event("A11y", "connected caps=0x${Integer.toHexString(caps)}")
         registerScreenReceiver()
         onStateChanged?.invoke()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null || event.eventType != AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED) return
+        if (event == null) return
+        when (event.eventType) {
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
+            AccessibilityEvent.TYPE_WINDOWS_CHANGED -> {
+                // Only a timestamp: the screen agent waits for the UI to go quiet
+                lastUiEventAt = SystemClock.elapsedRealtime()
+                return
+            }
+        }
+        if (event.eventType != AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED) return
         // The notification listener already captures the full text; this is the fallback
         if (MessageListenerService.instance != null) return
         val pkg = event.packageName?.toString() ?: return
@@ -183,6 +194,22 @@ class AccessibilitySvc : AccessibilityService() {
         /** Connected/destroyed — lets the service refresh its status line. */
         @Volatile
         var onStateChanged: (() -> Unit)? = null
+
+        /** elapsedRealtime of the last window/content change anywhere on screen. */
+        @Volatile
+        var lastUiEventAt = 0L
+
+        /**
+         * Screen reading and control need the capabilities added in 2.0. Android
+         * re-reads them when it rebinds the service; if the phone kept the old set,
+         * the service has to be toggled off and on once.
+         */
+        fun hasScreenCapabilities(): Boolean {
+            val caps = instance?.serviceInfo?.capabilities ?: return false
+            val needed = android.accessibilityservice.AccessibilityServiceInfo.CAPABILITY_CAN_RETRIEVE_WINDOW_CONTENT or
+                android.accessibilityservice.AccessibilityServiceInfo.CAPABILITY_CAN_PERFORM_GESTURES
+            return caps and needed == needed
+        }
 
         /** How long after process start the system normally needs to bind the service. */
         const val CONNECT_GRACE_MS = 15_000L

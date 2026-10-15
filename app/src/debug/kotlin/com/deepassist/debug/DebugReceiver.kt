@@ -3,6 +3,9 @@ package com.deepassist.debug
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.util.Log
+import com.deepassist.agent.ScreenReader
+import com.deepassist.service.AccessibilitySvc
 import com.deepassist.service.AssistantForegroundService
 
 /**
@@ -11,6 +14,11 @@ import com.deepassist.service.AssistantForegroundService
  *   adb shell am broadcast -a com.deepassist.DEBUG_PROMPT --es text "saat kaç"
  *
  * starts a session whose first request is the given text instead of speech.
+ *
+ *   adb shell am broadcast -p com.deepassist -a com.deepassist.DUMP_SCREEN
+ *
+ * logs what ScreenReader sees on the current screen (tag ScreenDump) — only on
+ * this explicit request, so screen content never reaches logcat otherwise.
  */
 class DebugReceiver : BroadcastReceiver() {
 
@@ -26,6 +34,20 @@ class DebugReceiver : BroadcastReceiver() {
                     )
                 }
             }
+            ACTION_DUMP_SCREEN -> {
+                val service = AccessibilitySvc.instance
+                if (service == null) {
+                    Log.w("ScreenDump", "accessibility service not running")
+                    return
+                }
+                val screen = ScreenReader.read(service)
+                Log.i("ScreenDump", "poor=${screen?.poor} caps=${AccessibilitySvc.hasScreenCapabilities()}")
+                screen?.describe()?.lines()?.forEach { Log.i("ScreenDump", it) }
+            }
         }
+    }
+
+    companion object {
+        const val ACTION_DUMP_SCREEN = "com.deepassist.DUMP_SCREEN"
     }
 }

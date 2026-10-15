@@ -2,5 +2,5 @@
 <resources>
     <string name="app_name">deepAssist</string>
     <string name="accessibility_service_label">deepAssist Bildirim Okuyucu</string>
-    <string name="accessibility_service_description">deepAssist\'in bildirimleri okuyabilmesi ve ekran kapama/açma ile tetiklenebilmesi için gereklidir. Bildirim içerikleri yalnızca cihazda tutulur.</string>
+    <string name="accessibility_service_description">deepAssist\'in bildirimleri okuyabilmesi, ekran kapama/açma ile tetiklenebilmesi, ekranda ne olduğunu sesli anlatabilmesi ve istediğinde telefonu senin yerine kullanabilmesi için gereklidir. Bildirim içerikleri yalnızca cihazda tutulur; ekran görüntüleri hiçbir yere kaydedilmez.</string>
 </resources>
