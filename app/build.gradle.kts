@@ -24,8 +24,8 @@ android {
         applicationId = "com.deepassist"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "2.0-dev"
+        versionCode = 4
+        versionName = "2.0"
 
         // Phones only: CameraX and ML Kit ship native code for every ABI otherwise
         ndk {

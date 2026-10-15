@@ -10,7 +10,7 @@ import com.deepassist.BuildConfig
 object WhatsNew {
 
     /** First version code this text belongs to; bump together with the text. */
-    private const val RELEASE_CODE = 3
+    private const val RELEASE_CODE = 4
     private const val PREFS = "deepassist_state"
     private const val KEY_SPOKEN = "whats_new_spoken"
     private const val KEY_DISMISSED = "whats_new_dismissed"
