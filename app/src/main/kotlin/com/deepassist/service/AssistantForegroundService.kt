@@ -40,6 +40,8 @@ import com.deepassist.speech.OpenAiTts
 import com.deepassist.speech.RealtimeStt
 import com.deepassist.speech.RealtimeSttResult
 import com.deepassist.speech.SpeechToText
+import com.deepassist.camera.LastPhoto
+import com.deepassist.tools.CameraLookTool
 import com.deepassist.tools.EndConversationTool
 import com.deepassist.tools.Tool
 import com.deepassist.tools.ToolRegistry
@@ -139,7 +141,8 @@ class AssistantForegroundService : Service() {
         earcons = Earcons(this)
         realtimeStt = RealtimeStt { secureStore.openAiApiKey }
         stt = SpeechToText { secureStore.openAiApiKey }
-        toolRegistry = ToolRegistry { question -> askUser(question) }
+        toolRegistry = ToolRegistry({ question -> askUser(question) }, deepSeek)
+        CameraLookTool.playEarcon = { earcons.play(it) }
         toolRegistry.initialize(this)
         chatHistory = ChatHistoryStore.get(this)
 
@@ -332,6 +335,7 @@ class AssistantForegroundService : Service() {
                     processing.set(false)
                     sessionActive = false
                     VoiceActivity.set(VoiceActivity.Phase.IDLE)
+                    LastPhoto.clear()
                     currentChatId = null
                     if (!hadError) updateNotification(computeStatusText())
                     hadError = false
@@ -836,6 +840,7 @@ class AssistantForegroundService : Service() {
         listening.set(false)
         processing.set(false)
         sessionActive = false
+        LastPhoto.clear()
         conversation.clear()
         currentChatId = null
         OverlayService.hide(this)

@@ -2,8 +2,9 @@ package com.deepassist.tools
 
 import android.content.Context
 import com.deepassist.data.ToolDefinition
+import com.deepassist.llm.DeepSeekClient
 
-class ToolRegistry(askUserCallback: suspend (String) -> String?) {
+class ToolRegistry(askUserCallback: suspend (String) -> String?, deepSeek: DeepSeekClient) {
 
     private val tools = linkedMapOf<String, Tool>()
 
@@ -20,6 +21,7 @@ class ToolRegistry(askUserCallback: suspend (String) -> String?) {
         register(WebSearchTool())
         register(WebPageTool())
         register(DeviceInfoTool())
+        register(CameraLookTool(deepSeek))
         register(YoutubeMusicTool())
         register(YoutubeVideoTool())
         register(WatchHistoryTool())
