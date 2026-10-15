@@ -116,6 +116,8 @@ class ScreenAgent(
                     }
                     val app = AppLauncher.find(context, name)
                     val opened = app != null && AppLauncher.launch(context, app)
+                    // Apps take a moment to come up; reading too early sees the old screen
+                    if (opened && app != null) awaitForeground(app.packageName)
                     history += "$step. Uygulama aç \"$name\" → ${if (opened) "${app?.label} açıldı" else "bulunamadı"}"
                 }
                 "tap" -> {
@@ -210,6 +212,14 @@ class ScreenAgent(
     }
 
     private fun done(success: Boolean, spoken: String) = Outcome(success, spoken, history.toList())
+
+    /** Waits (at most 3 s) until [packageName] is the app on screen. */
+    private suspend fun awaitForeground(packageName: String) {
+        repeat(30) {
+            if (ScreenReader.read(service)?.packageName == packageName) return
+            delay(100)
+        }
+    }
 
     /** The spoken yes/no question, built from what is on screen rather than what the model believes. */
     private fun confirmation(

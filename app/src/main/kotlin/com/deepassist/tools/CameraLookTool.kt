@@ -32,9 +32,10 @@ class CameraLookTool(private val deepSeek: DeepSeekClient) : Tool() {
         ),
         "mode" to ToolProperty(
             type = "string",
-            description = "describe: etrafı/nesneyi anlat. read_text: kısa bir yazıyı (etiket, tabela, kutu) hemen oku. " +
-                "guide_read: belge, fatura, mektup, ilaç prospektüsü gibi bir sayfayı okurken kullanıcıyı " +
-                "'sola çevir, yaklaştır' diye yönlendirip yazı tam görününce oku. money: parayı say.",
+            description = "describe: etrafı/nesneyi anlat. guide_read: HER yeni okuma isteği (etiket, kutu, kağıt, fatura, " +
+                "mektup, prospektüs); yazı kadrajda değilse kullanıcıyı 'sola çevir, yaklaştır' diye yönlendirir, düzgünse " +
+                "hemen okur. read_text: yalnızca use_last_photo=true ile az önceki fotoğraftaki yazıyı tekrar okumak için. " +
+                "money: parayı say.",
             enum = listOf("describe", "read_text", "guide_read", "money")
         ),
         "use_last_photo" to ToolProperty(

@@ -30,6 +30,13 @@ class FramingGuideTest {
     }
 
     @Test
+    fun textStoppingJustShortOfAnEdgeCountsAsCut() {
+        // ML Kit drops the half-visible first letters; the line still runs off the left
+        assertEquals(Advice.TURN_LEFT, advise(Box(55, 300, 800, 420)))
+        assertEquals(Advice.GOOD, advise(Box(90, 300, 900, 420)))
+    }
+
+    @Test
     fun tinyTextMeansTooFar() = assertEquals(Advice.TOO_FAR, advise(Box(450, 450, 600, 520)))
 
     @Test

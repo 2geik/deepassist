@@ -9,6 +9,8 @@ class ToolRegistry(askUserCallback: suspend (String) -> String?, deepSeek: DeepS
     private val tools = linkedMapOf<String, Tool>()
 
     init {
+        // Tools ask the user through this (use_phone confirmations); it was never wired before
+        Tool.askUser = askUserCallback
         register(ContactsTool())
         register(PhoneCallTool())
         register(SmsReadTool())

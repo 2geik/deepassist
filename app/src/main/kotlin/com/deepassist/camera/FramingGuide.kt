@@ -23,8 +23,14 @@ object FramingGuide {
         GOOD(null)
     }
 
-    /** Edge band (share of the frame) in which text counts as cut off. */
-    private const val EDGE = 0.03f
+    /**
+     * Edge bands (share of the frame) in which text counts as cut off. Generous on
+     * purpose: ML Kit drops half-visible letters at the edge, so the last detected
+     * word often stops short of the border even when the line goes on (seen on the
+     * phone: "...er abi" with "Öm" cut off still looked centred at 3%).
+     */
+    private const val EDGE_X = 0.07f
+    private const val EDGE_Y = 0.06f
 
     /** Text covering less than this share of the frame is too small to read. */
     private const val MIN_COVERAGE = 0.06f
@@ -37,8 +43,8 @@ object FramingGuide {
         val right = text.maxOf { it.right }
         val bottom = text.maxOf { it.bottom }
 
-        val edgeX = frameWidth * EDGE
-        val edgeY = frameHeight * EDGE
+        val edgeX = frameWidth * EDGE_X
+        val edgeY = frameHeight * EDGE_Y
         val cutLeft = left <= edgeX
         val cutRight = right >= frameWidth - edgeX
         val cutTop = top <= edgeY

@@ -85,6 +85,13 @@ class SessionActivity : ComponentActivity() {
         ChatSession.setListener { runOnUiThread { render() } }
         render()
         DiagLog.event("Panel", "created")
+        // A launch that arrives after its session already ended (e.g. the power key
+        // pressed meanwhile) would leave a stale panel up: close it at once
+        if (intent?.hasExtra(EXTRA_BOOTSTRAP_ACTION) != true && !AssistantForegroundService.sessionActive) {
+            DiagLog.event("Panel", "late launch after session end, closing")
+            finish()
+            return
+        }
         handleBootstrap(intent)
     }
 

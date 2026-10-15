@@ -86,6 +86,7 @@ object GuidedReader {
                     val text = frame.advice.spoken ?: continue
                     val gap = if (frame.advice == lastSpoken) REPEAT_GAP_MS else SPEAK_GAP_MS
                     if (now - lastSpokenAt >= gap) {
+                        Log.i(TAG, "cue ${frame.advice}")
                         cue(text)
                         lastSpoken = frame.advice
                         lastSpokenAt = now
