@@ -15,6 +15,8 @@ import kotlinx.coroutines.withContext
 
 class WhatsAppTool : Tool() {
 
+    override val successEarcon = true
+
     override val name = "send_whatsapp"
     override val description =
         "WhatsApp ile mesaj gönderir. SADECE kullanıcı onayladıktan sonra confirmed=true ile çağır."

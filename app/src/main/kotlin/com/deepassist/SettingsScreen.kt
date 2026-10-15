@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -33,6 +32,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.deepassist.data.SecureStore
+import com.deepassist.ui.ScreenHeader
+import com.deepassist.ui.SectionCard
+import com.deepassist.ui.theme.LocalExtraColors
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.Icon
 import com.deepassist.util.PermissionsHelper
 
 @Composable
@@ -57,50 +63,39 @@ fun SettingsScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .systemBarsPadding()
             .verticalScroll(rememberScrollState())
-            .padding(20.dp)
     ) {
-        Text("deepAssist", style = MaterialTheme.typography.headlineMedium)
-        Text(
-            "Görme engelliler için sesli asistan",
-            style = MaterialTheme.typography.bodyMedium,
-            color = Color.Gray
-        )
+        ScreenHeader(title = "Ayarlar", subtitle = "Görme engelliler için sesli asistan")
 
-        Spacer(Modifier.height(20.dp))
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("Sesli yanıt", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "Cevaplar sesli olarak okunur",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.Gray
+        SectionCard(title = "Ses") {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Sesli yanıt", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "Cevaplar sesli olarak okunur",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = voiceEnabled,
+                    onCheckedChange = {
+                        voiceEnabled = it
+                        secureStore.voiceResponseEnabled = it
+                    }
                 )
             }
-            Switch(
-                checked = voiceEnabled,
-                onCheckedChange = {
-                    voiceEnabled = it
-                    secureStore.voiceResponseEnabled = it
-                }
-            )
         }
 
-        Spacer(Modifier.height(12.dp))
-        HorizontalDivider()
-        Spacer(Modifier.height(12.dp))
-
-        Text("İzinler", style = MaterialTheme.typography.titleMedium)
-        Spacer(Modifier.height(4.dp))
-
+        SectionCard(title = "İzinler") {
         PermissionRow(
             title = "Temel izinler",
-            subtitle = "Mikrofon, rehber, arama, SMS, bildirim",
+            subtitle = "Mikrofon, rehber, arama, SMS, kamera, konum, bildirim",
             granted = hasRuntime,
             onRequest = onRequestRuntimePermissions
         )
@@ -201,8 +196,10 @@ fun SettingsScreen(
             )
         }
 
+        }
+
         // Xiaomi-specific extra permissions
-        if (android.os.Build.MANUFACTURER.equals("xiaomi", ignoreCase = true)) {
+        if (android.os.Build.MANUFACTURER.equals("xiaomi", ignoreCase = true)) SectionCard(title = "Xiaomi") {
             PermissionRow(
                 title = "Xiaomi ek izinleri",
                 subtitle = "Kilit ekranında göster + Arka planda açılır pencere",
@@ -232,24 +229,42 @@ fun SettingsScreen(
             )
         }
 
-        Spacer(Modifier.height(16.dp))
+        SectionCard(title = "Asistan") {
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+                Text(
+                    "Güç tuşuna iki kez bas, ana ekran tuşunu basılı tut ya da bildirimdeki " +
+                        "deepAssist satırına dokun. Tınıyı duyunca konuşabilirsin.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedButton(
+                    onClick = {
+                        runCatching {
+                            context.startActivity(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS))
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Varsayılan asistan yap") }
+            }
+        }
 
-        OutlinedButton(
-            onClick = {
-                runCatching {
-                    context.startActivity(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS))
-                }
-            },
-            modifier = Modifier.fillMaxWidth()
-        ) { Text("Varsayılan Asistan Yap") }
-
-        Spacer(Modifier.height(12.dp))
-        Text(
-            "Kullanım: bildirimdeki deepAssist satırına dokun, ekranı kapatıp hemen aç " +
-                "veya ana ekran tuşunu basılı tut. Titreşimden sonra konuşabilirsin.",
-            style = MaterialTheme.typography.bodySmall,
-            color = Color.Gray
-        )
+        SectionCard(title = "Hakkında") {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Sürüm", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        Spacer(Modifier.height(24.dp))
     }
 }
 
@@ -263,19 +278,23 @@ private fun PermissionRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 6.dp),
+            .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Column(Modifier.weight(1f)) {
             Text(title, style = MaterialTheme.typography.bodyLarge)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Spacer(Modifier.width(12.dp))
         if (granted) {
-            Text("Verildi", color = Color(0xFF2E7D32), fontWeight = FontWeight.Bold)
+            Icon(
+                Icons.Outlined.CheckCircle,
+                contentDescription = "Verildi",
+                tint = LocalExtraColors.current.success
+            )
         } else {
-            Button(onClick = onRequest) { Text("İzin Ver") }
+            FilledTonalButton(onClick = onRequest) { Text("Aç") }
         }
     }
 }

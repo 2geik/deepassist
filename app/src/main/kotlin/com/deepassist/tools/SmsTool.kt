@@ -117,6 +117,8 @@ class SmsReadTool : Tool() {
 
 class SmsSendTool : Tool() {
 
+    override val successEarcon = true
+
     override val name = "send_sms"
     override val description =
         "Verilen numaraya SMS gönderir. Numara bilinmiyorsa önce search_contacts ile bulunmalıdır. " +

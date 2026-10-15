@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ic_launcher_background">#1A237E</color>
-    <color name="overlay_background">#FFFFFF</color>
-    <color name="overlay_text">#212121</color>
+    <!-- Terracotta of the "Sıcak" theme -->
+    <color name="ic_launcher_background">#C8643B</color>
+    <!-- Shown for the instant before Compose draws: matches the theme's paper -->
+    <color name="window_background">#FBF7F0</color>
 </resources>

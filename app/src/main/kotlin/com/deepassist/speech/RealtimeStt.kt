@@ -86,6 +86,12 @@ class RealtimeStt(private val apiKeyProvider: () -> String) {
                         while (isActive) {
                             val read = recorder.read(buf, 0, buf.size)
                             if (read <= 0) break
+                            var peak = 0
+                            for (i in 0 until read) {
+                                val a = kotlin.math.abs(buf[i].toInt())
+                                if (a > peak) peak = a
+                            }
+                            com.deepassist.service.VoiceActivity.reportPeak(peak)
                             val append = JsonObject().apply {
                                 addProperty("type", "input_audio_buffer.append")
                                 addProperty(

@@ -25,6 +25,9 @@ abstract class Tool {
      */
     open val waitForSpeech: Boolean = false
 
+    /** Plays the "done" chime when [execute] succeeds — for actions, not questions. */
+    open val successEarcon: Boolean = false
+
     /** Upper bound the orchestrator gives [execute]; long-running tools raise it. */
     open val timeoutMs: Long = 45_000L
 

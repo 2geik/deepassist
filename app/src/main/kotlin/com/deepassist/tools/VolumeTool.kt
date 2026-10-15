@@ -10,6 +10,8 @@ import java.util.Locale
 
 class VolumeTool : Tool() {
 
+    override val successEarcon = true
+
     override val name = "set_volume"
     override val description =
         "Ses seviyesini ayarlar: müzik, zil sesi, bildirim, alarm veya arama sesi. " +

@@ -16,6 +16,8 @@ import kotlinx.coroutines.withContext
 
 class RenameContactTool : Tool() {
 
+    override val successEarcon = true
+
     override val name = "rename_contact"
     override val description =
         "Rehberdeki bir kişinin adını değiştirir. Kişi adıyla arar ve yeni isimle günceller."

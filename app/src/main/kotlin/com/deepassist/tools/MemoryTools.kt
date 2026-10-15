@@ -9,6 +9,8 @@ import kotlinx.coroutines.withContext
 
 class SaveMemoryTool : Tool() {
 
+    override val successEarcon = true
+
     override val name = "save_memory"
     override val description =
         "Kullanıcı hakkında kalıcı bir bilgiyi hemen kaydeder. SADECE kullanıcı açıkça 'unutma', " +
@@ -39,6 +41,8 @@ class SaveMemoryTool : Tool() {
 }
 
 class ForgetMemoryTool : Tool() {
+
+    override val successEarcon = true
 
     override val name = "forget_memory"
     override val description =

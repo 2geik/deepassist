@@ -11,6 +11,8 @@ import java.util.Locale
 
 class BrightnessTool : Tool() {
 
+    override val successEarcon = true
+
     override val name = "set_brightness"
     override val description =
         "Ekran parlaklığını ayarlar. Yüzde olarak (0-100) seviye verebilir veya otomatik/manuel mod arasında geçiş yapabilir."

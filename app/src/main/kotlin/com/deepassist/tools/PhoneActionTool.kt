@@ -19,6 +19,8 @@ import java.util.Locale
 
 class PhoneActionTool : Tool() {
 
+    override val successEarcon = true
+
     override val name = "phone_action"
     override val description =
         "Telefonda genel işlemler yapar. Uygulama açma, URL açma, alarm kurma, " +

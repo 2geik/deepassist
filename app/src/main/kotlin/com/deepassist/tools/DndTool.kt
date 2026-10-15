@@ -11,6 +11,8 @@ import java.util.Locale
 
 class DndTool : Tool() {
 
+    override val successEarcon = true
+
     override val name = "set_ringer_mode"
     override val description =
         "Telefonun ses modunu ayarlar: sessiz, titreşim, normal veya sadece öncelikli. " +

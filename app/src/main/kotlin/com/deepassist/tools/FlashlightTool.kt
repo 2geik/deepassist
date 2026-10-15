@@ -12,6 +12,8 @@ import java.util.Locale
 
 class FlashlightTool : Tool() {
 
+    override val successEarcon = true
+
     override val name = "control_flashlight"
     override val description =
         "El fenerini (flaş) açar veya kapatır. Karanlıkta ışık yakma, feneri aç/kapat gibi komutlar için kullan."

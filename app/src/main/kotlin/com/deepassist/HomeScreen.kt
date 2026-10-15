@@ -1,112 +1,129 @@
 package com.deepassist
 
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.deepassist.data.ChatHistoryStore
 import com.deepassist.data.ChatSummary
+import com.deepassist.ui.EmptyState
+import com.deepassist.ui.ReadinessCard
+import com.deepassist.ui.ScreenHeader
+import com.deepassist.util.Readiness
 import java.text.SimpleDateFormat
-import java.util.*
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun HomeScreen(
     refreshTick: Int,
     onOpenChat: (String) -> Unit,
-    onOpenSettings: () -> Unit,
-    onOpenMemory: () -> Unit
+    onOpenSettings: () -> Unit
 ) {
     val context = LocalContext.current
     val chats = remember(refreshTick) {
         runCatching { ChatHistoryStore.get(context).list() }.getOrDefault(emptyList())
     }
+    val problems = remember(refreshTick) { Readiness.problems(context) }
+    val groups = remember(chats) { chats.sortedByDescending { it.updatedAt }.groupBy { dayLabel(it.updatedAt) } }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        // Top bar
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("deepAssist", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = onOpenMemory) { Text("Hafıza") }
-                TextButton(onClick = onOpenSettings) { Text("Ayarlar") }
-            }
-        }
-
-        HorizontalDivider()
+    LazyColumn(Modifier.fillMaxSize()) {
+        item { ScreenHeader(title = "deepAssist", subtitle = "Sesli yardımcın") }
+        item { ReadinessCard(problems = problems, onFix = onOpenSettings) }
 
         if (chats.isEmpty()) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    "Henüz sohbet yok.\nAsistanı tetikleyip konuşmaya başla.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 14.sp
+            item {
+                EmptyState(
+                    title = "İlk sohbetini başlat",
+                    body = "Asistanla konuştukça sohbetler burada görünür. Bir sohbete dokunup kaldığın yerden devam edebilirsin."
                 )
             }
         } else {
-            LazyColumn(modifier = Modifier.fillMaxSize()) {
-                items(chats, key = { it.id }) { chat ->
-                    ChatListItem(
-                        chat = chat,
-                        onClick = { onOpenChat(chat.id) }
+            groups.forEach { (day, dayChats) ->
+                item(key = "h-$day") {
+                    Text(
+                        day,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .padding(start = 24.dp, top = 20.dp, bottom = 4.dp)
+                            .semantics { heading() }
+                    )
+                }
+                items(dayChats, key = { it.id }) { chat ->
+                    ChatRow(chat = chat, onClick = { onOpenChat(chat.id) })
+                    HorizontalDivider(
+                        Modifier.padding(start = 24.dp, end = 16.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant
                     )
                 }
             }
         }
+        item { Spacer(Modifier.height(24.dp)) }
     }
 }
 
 @Composable
-private fun ChatListItem(chat: ChatSummary, onClick: () -> Unit) {
+private fun ChatRow(chat: ChatSummary, onClick: () -> Unit) {
     Row(
-        modifier = Modifier
+        Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            .padding(horizontal = 24.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Column(modifier = Modifier.weight(1f)) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(
-                text = chat.title.ifBlank { "Sohbet" },
-                fontSize = 16.sp,
+                chat.title.ifBlank { "Sohbet" },
+                style = MaterialTheme.typography.bodyLarge,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
             Text(
-                text = "${formatRelativeDate(chat.updatedAt)} · ${chat.messageCount} mesaj",
-                fontSize = 13.sp,
+                "${chat.messageCount} mesaj",
+                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+        Spacer(Modifier.width(12.dp))
+        Text(
+            SimpleDateFormat("HH:mm", Locale("tr", "TR")).format(Date(chat.updatedAt)),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
-private fun formatRelativeDate(timestamp: Long): String {
-    val now = Calendar.getInstance()
-    val then = Calendar.getInstance().apply { timeInMillis = timestamp }
+private fun dayLabel(timestamp: Long): String {
+    val day = Calendar.getInstance().apply { timeInMillis = timestamp }
+    val today = Calendar.getInstance()
+    val yesterday = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -1) }
+    fun Calendar.sameDay(other: Calendar) =
+        get(Calendar.YEAR) == other.get(Calendar.YEAR) && get(Calendar.DAY_OF_YEAR) == other.get(Calendar.DAY_OF_YEAR)
     return when {
-        now.get(Calendar.YEAR) == then.get(Calendar.YEAR) &&
-            now.get(Calendar.DAY_OF_YEAR) == then.get(Calendar.DAY_OF_YEAR) -> {
-            SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestamp))
-        }
-        now.get(Calendar.YEAR) == then.get(Calendar.YEAR) &&
-            now.get(Calendar.DAY_OF_YEAR) - then.get(Calendar.DAY_OF_YEAR) == 1 -> "Dün"
-        else -> SimpleDateFormat("dd.MM.yyyy", Locale.getDefault()).format(Date(timestamp))
+        day.sameDay(today) -> "Bugün"
+        day.sameDay(yesterday) -> "Dün"
+        else -> SimpleDateFormat("d MMMM EEEE", Locale("tr", "TR")).format(Date(timestamp))
     }
 }

@@ -15,14 +15,10 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
-import android.media.ToneGenerator
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
-import android.os.VibrationEffect
-import android.os.Vibrator
-import android.os.VibratorManager
 import android.util.Log
 import com.deepassist.BuildConfig
 import com.deepassist.MainActivity
@@ -39,6 +35,7 @@ import com.deepassist.llm.DeepSeekClient
 import com.deepassist.llm.SystemPrompt
 import com.deepassist.llm.ToolParser
 import com.deepassist.speech.AndroidTts
+import com.deepassist.speech.Earcons
 import com.deepassist.speech.OpenAiTts
 import com.deepassist.speech.RealtimeStt
 import com.deepassist.speech.RealtimeSttResult
@@ -47,6 +44,7 @@ import com.deepassist.tools.EndConversationTool
 import com.deepassist.tools.Tool
 import com.deepassist.tools.ToolRegistry
 import com.deepassist.util.DiagLog
+import com.deepassist.util.Haptics
 import com.deepassist.util.PermissionsHelper
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -98,6 +96,7 @@ class AssistantForegroundService : Service() {
     private lateinit var memoryExtractor: MemoryExtractor
     private lateinit var openAiTts: OpenAiTts
     private lateinit var androidTts: AndroidTts
+    private lateinit var earcons: Earcons
 
     // STT: realtime streaming session is the primary path, multipart is the fallback
     private lateinit var realtimeStt: RealtimeStt
@@ -137,6 +136,7 @@ class AssistantForegroundService : Service() {
         memoryExtractor = MemoryExtractor(this, deepSeek)
         openAiTts = OpenAiTts { secureStore.openAiApiKey }
         androidTts = AndroidTts(this)
+        earcons = Earcons(this)
         realtimeStt = RealtimeStt { secureStore.openAiApiKey }
         stt = SpeechToText { secureStore.openAiApiKey }
         toolRegistry = ToolRegistry { question -> askUser(question) }
@@ -331,6 +331,7 @@ class AssistantForegroundService : Service() {
                     listening.set(false)
                     processing.set(false)
                     sessionActive = false
+                    VoiceActivity.set(VoiceActivity.Phase.IDLE)
                     currentChatId = null
                     if (!hadError) updateNotification(computeStatusText())
                     hadError = false
@@ -443,6 +444,7 @@ class AssistantForegroundService : Service() {
                 }
                 pcm.write(bytes)
 
+                VoiceActivity.reportPeak(maxAmp)
                 val chunkMs = read * 1000L / sampleRate
                 if (maxAmp < SILENCE_THRESHOLD) {
                     silenceMs += chunkMs
@@ -496,6 +498,7 @@ class AssistantForegroundService : Service() {
     /** @return true when the conversation ended (farewell or error) — stop the listen loop. */
     private suspend fun processUserPrompt(text: String): Boolean {
         processing.set(true)
+        VoiceActivity.set(VoiceActivity.Phase.THINKING)
         try {
             updateNotification("Düşünüyorum...")
             overlayStatus("Düşünüyorum...")
@@ -687,6 +690,10 @@ class AssistantForegroundService : Service() {
                 toolInProgress = false
                 lastToolFinishedAt = SystemClock.elapsedRealtime()
             }
+            if (tool.successEarcon && results[callId]?.success == true) {
+                earcons.play(Earcons.Sound.SUCCESS)
+                Haptics.success(this)
+            }
         }
         return results
     }
@@ -741,6 +748,7 @@ class AssistantForegroundService : Service() {
     private suspend fun speak(text: String) {
         if (!secureStore.voiceResponseEnabled || text.isBlank()) return
         val budgetMs = (SPEAK_BASE_MS + text.length * SPEAK_PER_CHAR_MS).coerceAtMost(SPEAK_MAX_MS)
+        VoiceActivity.set(VoiceActivity.Phase.SPEAKING)
         coroutineScope {
             val timedOut = AtomicBoolean(false)
             // A TTS engine can silently drop an utterance or stall on the network;
@@ -757,6 +765,9 @@ class AssistantForegroundService : Service() {
                 if (!played && !timedOut.get()) androidTts.speak(text)
             } finally {
                 watchdog.cancel()
+                if (VoiceActivity.phase.value == VoiceActivity.Phase.SPEAKING) {
+                    VoiceActivity.set(if (processing.get()) VoiceActivity.Phase.THINKING else VoiceActivity.Phase.IDLE)
+                }
             }
         }
     }
@@ -861,6 +872,8 @@ class AssistantForegroundService : Service() {
 
     private suspend fun handleError(message: String) {
         hadError = true
+        earcons.play(Earcons.Sound.ERROR)
+        Haptics.error(this)
         val detail = "Bir sorun oluştu: $message"
         if (PermissionsHelper.hasOverlay(this)) {
             OverlayService.showMessage(this, detail)
@@ -923,22 +936,13 @@ class AssistantForegroundService : Service() {
     private fun startListeningFeedback(text: String) {
         updateNotification(text.take(120))
         if (PermissionsHelper.hasOverlay(this)) OverlayService.showListening(this, text)
-        vibrate()
+        VoiceActivity.set(VoiceActivity.Phase.LISTENING)
+        Haptics.listenStart(this)
         earcon(open = true)
     }
 
     private fun earcon(open: Boolean) {
-        runCatching {
-            val tone = ToneGenerator(AudioManager.STREAM_MUSIC, EARCON_VOLUME)
-            tone.startTone(
-                if (open) ToneGenerator.TONE_PROP_BEEP else ToneGenerator.TONE_PROP_BEEP2,
-                160
-            )
-            serviceScope.launch {
-                delay(350)
-                runCatching { tone.release() }
-            }
-        }
+        earcons.play(if (open) Earcons.Sound.LISTEN_START else Earcons.Sound.LISTEN_END)
     }
 
     // ==================================================================
@@ -1063,7 +1067,7 @@ class AssistantForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         return Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("deepAssist")
             .setContentText(text)
             .setStyle(Notification.BigTextStyle().bigText(text))
@@ -1084,22 +1088,8 @@ class AssistantForegroundService : Service() {
     }
 
     // ==================================================================
-    // Haptics & wake lock
+    // Wake lock
     // ==================================================================
-
-    private fun vibrate() {
-        runCatching {
-            val vibrator = if (Build.VERSION.SDK_INT >= 31) {
-                (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager)
-                    .defaultVibrator
-            } else {
-                @Suppress("DEPRECATION")
-                getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-            }
-            vibrator.vibrate(VibrationEffect.createOneShot(50,
-                VibrationEffect.DEFAULT_AMPLITUDE))
-        }
-    }
 
     private fun acquireWakeLock(): PowerManager.WakeLock? = runCatching {
         val pm = getSystemService(POWER_SERVICE) as PowerManager
@@ -1124,6 +1114,7 @@ class AssistantForegroundService : Service() {
         runCatching { openAiTts.stop() }
         runCatching { androidTts.stop() }
         runCatching { androidTts.shutdown() }
+        earcons.release()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -1183,7 +1174,6 @@ class AssistantForegroundService : Service() {
 
         private const val MAX_TOOL_ROUNDS = 6
         private const val MAX_CONVERSATION_TURNS = 50
-        private const val EARCON_VOLUME = 80
         private const val ASK_USER_TIMEOUT_MS = 30_000L
         private const val MAX_RECORD_MS = 8_000L
         private const val SILENCE_STOP_MS = 3_000L

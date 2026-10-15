@@ -9,6 +9,8 @@ import java.util.Locale
 
 class SleepTimerTool : Tool() {
 
+    override val successEarcon = true
+
     override val name = "sleep_timer"
     override val description =
         "Uyku zamanlayıcısı: belirtilen süre sonra çalan müziğin, videonun veya radyo tiyatrosunun sesini " +
