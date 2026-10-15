@@ -24,6 +24,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Log
+import com.deepassist.BuildConfig
 import com.deepassist.MainActivity
 import com.deepassist.R
 import com.deepassist.SessionActivity
@@ -183,6 +184,10 @@ class AssistantForegroundService : Service() {
         when (intent?.action) {
             ACTION_VOICE_TRIGGER, ACTION_POWER_TRIGGER, ACTION_TAP_TRIGGER ->
                 handleTrigger(intent?.getStringExtra(EXTRA_RESUME_CHAT_ID))
+            // Debug builds only: adb types the first request instead of the microphone
+            ACTION_DEBUG_PROMPT -> if (BuildConfig.DEBUG) {
+                handleTrigger(debugPrompt = intent?.getStringExtra(EXTRA_DEBUG_TEXT))
+            }
             ACTION_END_SESSION -> endCurrentSession()
             ACTION_STOP -> {
                 stopSelf()
@@ -197,7 +202,7 @@ class AssistantForegroundService : Service() {
     // Trigger — session entry point
     // ==================================================================
 
-    private fun handleTrigger(resumeChatId: String? = null) {
+    private fun handleTrigger(resumeChatId: String? = null, debugPrompt: String? = null) {
         // An open ask_user question: the trigger means "I'm answering now"
         if (pendingQuestion != null && !listening.get()) {
             Log.i(TAG, "trigger: answering pending question")
@@ -262,9 +267,12 @@ class AssistantForegroundService : Service() {
                 while (isActive && turn < MAX_CONVERSATION_TURNS && !sessionEnded) {
                     turn++
                     runCatching { wakeLock?.acquire(180_000L) }
-                    startListeningFeedback("Dinliyorum...")
-                    val text = listenAndTranscribe()
-                    earcon(open = false)
+                    val text = if (turn == 1 && !debugPrompt.isNullOrBlank()) {
+                        debugPrompt
+                    } else {
+                        startListeningFeedback("Dinliyorum...")
+                        listenAndTranscribe().also { earcon(open = false) }
+                    }
 
                     if (text.isNullOrBlank()) {
                         if (turn == 1) {
@@ -589,6 +597,13 @@ class AssistantForegroundService : Service() {
             val results = executeToolCalls(toolCalls, phraseSpoken)
             conversation.addMessages(ToolParser.buildToolCallMessages(toolCalls, results))
 
+            // Tools whose result is the answer itself skip the extra DeepSeek round
+            directAnswer(toolCalls, results)?.let { answer ->
+                conversation.addAssistantMessage(answer)
+                showAndSpeak(answer)
+                return false
+            }
+
             updateNotification("Cevap hazırlanıyor...")
             overlayStatus("Cevap hazırlanıyor...")
             val reply = deepSeek.complete(conversation.getMessages(), toolRegistry.getDefinitions())
@@ -610,6 +625,21 @@ class AssistantForegroundService : Service() {
         }
         handleError("İşlem çok fazla adım gerektirdi ve yarıda kesildi.")
         return true
+    }
+
+    /**
+     * The spoken answer when every call of the round returned [ToolResult.speakDirectly],
+     * else null. The history stays valid: assistant(tool_calls) → tool → assistant(text),
+     * the same shape as a normal final answer.
+     */
+    private fun directAnswer(toolCalls: List<ToolCall>, results: Map<String, ToolResult>): String? {
+        val callResults = toolCalls.map { call -> call.id?.let { results[it] } ?: return null }
+        if (callResults.isEmpty() || callResults.any { !it.speakDirectly }) return null
+        return callResults
+            .map { r -> if (r.success) r.data else (r.error ?: r.data) }
+            .filter { it.isNotBlank() }
+            .joinToString(" ")
+            .ifBlank { null }
     }
 
     // ==================================================================
@@ -645,7 +675,7 @@ class AssistantForegroundService : Service() {
 
             toolInProgress = true
             results[callId] = try {
-                withTimeoutOrNull(TOOL_TIMEOUT_MS) { tool.execute(args) }
+                withTimeoutOrNull(tool.timeoutMs) { tool.execute(args) }
                     ?: ToolResult(false, "", error = "İşlem zaman aşımına uğradı.").also {
                         Log.w(TAG, "tool ${fn.name} timed out")
                     }
@@ -1107,6 +1137,8 @@ class AssistantForegroundService : Service() {
         const val ACTION_TAP_TRIGGER = "com.deepassist.TAP_TRIGGER"
         const val ACTION_END_SESSION = "com.deepassist.END_SESSION"
         const val ACTION_STOP = "com.deepassist.STOP"
+        const val ACTION_DEBUG_PROMPT = "com.deepassist.DEBUG_PROMPT"
+        const val EXTRA_DEBUG_TEXT = "text"
         const val EXTRA_RESUME_CHAT_ID = "resume_chat_id"
 
         private const val TAG = "AssistantFgs"
@@ -1156,7 +1188,6 @@ class AssistantForegroundService : Service() {
         private const val MAX_RECORD_MS = 8_000L
         private const val SILENCE_STOP_MS = 3_000L
         private const val SILENCE_THRESHOLD = 500
-        private const val TOOL_TIMEOUT_MS = 45_000L
         private const val PREVIOUS_SESSION_JOIN_MS = 2_000L
         private const val SPEAK_BASE_MS = 8_000L
         private const val SPEAK_PER_CHAR_MS = 90L

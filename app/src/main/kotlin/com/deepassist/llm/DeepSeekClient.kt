@@ -6,7 +6,10 @@ import com.deepassist.data.StreamResponse
 import com.deepassist.data.ToolCall
 import com.deepassist.data.ToolDefinition
 import com.deepassist.data.ToolFunction
+import android.util.Base64
+import android.util.Log
 import com.google.gson.Gson
+import com.google.gson.JsonParser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
@@ -17,6 +20,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /** Tool call assembled from multiple SSE deltas, keyed by stream index. */
@@ -31,6 +35,9 @@ class AccumulatingToolCall(val index: Int) {
         function = ToolFunction(name = name ?: "", arguments = arguments.toString())
     )
 }
+
+/** A DeepSeek call that got an HTTP error back (the body is logged, never shown). */
+class DeepSeekHttpException(val code: Int) : IOException("DeepSeek HTTP $code")
 
 data class StreamEvent(
     val contentDelta: String? = null,
@@ -161,15 +168,107 @@ class DeepSeekClient(private val apiKeyProvider: () -> String) {
             try {
                 val request = buildRequest(apiKey, messages, tools, stream = false)
                 client.newCall(request).execute().use { resp ->
-                    if (!resp.isSuccessful) return@withContext null
+                    if (!resp.isSuccessful) {
+                        Log.w(TAG, "complete HTTP ${resp.code}: ${resp.body?.string()?.take(300)}")
+                        return@withContext null
+                    }
                     val body = resp.body?.string() ?: return@withContext null
                     val parsed = gson.fromJson(body, CompletionResponse::class.java)
                     parsed.choices?.firstOrNull()?.message
                 }
             } catch (e: Exception) {
+                Log.w(TAG, "complete failed: ${e.javaClass.simpleName} ${e.message}")
                 null
             }
         }
+
+    /**
+     * One image plus a question, answered without thinking (about 2 s for a
+     * 1280 px JPEG). The image travels inline in this request only and never
+     * enters the conversation history.
+     */
+    suspend fun describeImage(
+        system: String,
+        question: String,
+        jpeg: ByteArray,
+        maxTokens: Int = 700
+    ): Result<String> = rawCompletion(
+        system = system,
+        userContent = listOf(textPart(question), imagePart(jpeg)),
+        maxTokens = maxTokens,
+        json = false
+    )
+
+    /**
+     * A JSON-only answer (response_format json_object, no thinking) — the screen
+     * agent's one-action-per-step calls. [jpeg] adds a screenshot when needed.
+     */
+    suspend fun completeJson(
+        system: String,
+        user: String,
+        jpeg: ByteArray? = null,
+        maxTokens: Int = 500
+    ): Result<String> = rawCompletion(
+        system = system,
+        userContent = listOfNotNull(textPart(user), jpeg?.let { imagePart(it) }),
+        maxTokens = maxTokens,
+        json = true
+    )
+
+    private suspend fun rawCompletion(
+        system: String,
+        userContent: List<Map<String, Any>>,
+        maxTokens: Int,
+        json: Boolean
+    ): Result<String> = withContext(Dispatchers.IO) {
+        val apiKey = apiKeyProvider()
+        if (apiKey.isBlank()) return@withContext Result.failure(IOException("DeepSeek key missing"))
+        val payload = mutableMapOf<String, Any>(
+            "model" to MODEL,
+            "messages" to listOf(
+                mapOf("role" to "system", "content" to system),
+                mapOf("role" to "user", "content" to userContent)
+            ),
+            "stream" to false,
+            "temperature" to 0.3,
+            "max_tokens" to maxTokens,
+            "thinking" to mapOf("type" to "disabled")
+        )
+        if (json) payload["response_format"] = mapOf("type" to "json_object")
+        val request = Request.Builder()
+            .url(ENDPOINT)
+            .addHeader("Authorization", "Bearer $apiKey")
+            .post(gson.toJson(payload).toRequestBody(jsonMediaType))
+            .build()
+        try {
+            client.newCall(request).execute().use { resp ->
+                val body = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    Log.w(TAG, "rawCompletion HTTP ${resp.code}: ${body.take(300)}")
+                    return@withContext Result.failure(DeepSeekHttpException(resp.code))
+                }
+                val content = JsonParser.parseString(body).asJsonObject
+                    .getAsJsonArray("choices")?.firstOrNull()?.asJsonObject
+                    ?.getAsJsonObject("message")?.get("content")
+                    ?.takeUnless { it.isJsonNull }?.asString
+                if (content.isNullOrBlank()) Result.failure(IOException("empty answer"))
+                else Result.success(content.trim())
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "rawCompletion failed: ${e.javaClass.simpleName} ${e.message}")
+            Result.failure(e)
+        }
+    }
+
+    private fun textPart(text: String): Map<String, Any> = mapOf("type" to "text", "text" to text)
+
+    private fun imagePart(jpeg: ByteArray): Map<String, Any> = mapOf(
+        "type" to "image_url",
+        "image_url" to mapOf(
+            "url" to "data:image/jpeg;base64," + Base64.encodeToString(jpeg, Base64.NO_WRAP),
+            "detail" to "high"
+        )
+    )
 
     private fun buildRequest(
         apiKey: String,
@@ -195,6 +294,7 @@ class DeepSeekClient(private val apiKeyProvider: () -> String) {
     }
 
     companion object {
+        private const val TAG = "DeepSeekClient"
         private const val ENDPOINT = "https://api.deepseek.com/chat/completions"
         private const val MODEL = "deepseek-flash"
     }

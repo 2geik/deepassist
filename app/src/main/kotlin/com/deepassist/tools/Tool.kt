@@ -25,6 +25,9 @@ abstract class Tool {
      */
     open val waitForSpeech: Boolean = false
 
+    /** Upper bound the orchestrator gives [execute]; long-running tools raise it. */
+    open val timeoutMs: Long = 45_000L
+
     protected lateinit var context: Context
 
     open fun initialize(context: Context) {

@@ -51,7 +51,13 @@ data class ToolResult(
     val success: Boolean,
     val data: String,
     val thinkingPhrase: String? = null,
-    val error: String? = null
+    val error: String? = null,
+    /**
+     * The result already is the spoken answer (a camera description, the screen
+     * agent's summary): speak it as is instead of sending it back to DeepSeek.
+     * On failure [error] is spoken, so it must be a natural Turkish sentence.
+     */
+    val speakDirectly: Boolean = false
 )
 
 // ---- Device-side models ----
