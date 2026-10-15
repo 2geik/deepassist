@@ -94,7 +94,7 @@ class ShortcutStore private constructor(private val file: File) {
 
     companion object {
         private const val MAX_SHORTCUTS = 50
-        private const val MIN_SIMILARITY = 0.5
+        private const val MIN_SIMILARITY = 0.6
         private const val SAME_GOAL = 0.8
 
         @Volatile

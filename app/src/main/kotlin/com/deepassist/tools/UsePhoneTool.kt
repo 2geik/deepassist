@@ -61,8 +61,6 @@ class UsePhoneTool(private val deepSeek: DeepSeekClient) : Tool() {
             "deepassist:agent"
         )
         runCatching { screenLock?.acquire(timeoutMs) }
-        // The panel stays away after the run too, so the screen the agent reached stays
-        // visible; the conversation goes on by voice (the mic reopens for a follow-up)
         PanelControl.stepAside()
         try {
             val agent = ScreenAgent(
@@ -82,6 +80,8 @@ class UsePhoneTool(private val deepSeek: DeepSeekClient) : Tool() {
             return spoken(outcome.success, outcome.spoken)
         } finally {
             runCatching { if (screenLock?.isHeld == true) screenLock.release() }
+            // The panel comes back with the spoken result and the follow-up question
+            PanelControl.restore()
         }
     }
 

@@ -314,6 +314,13 @@ class AssistantForegroundService : Service() {
                         sessionEnded = true
                         break // conversation over (farewell or error)
                     }
+                    // A bare "teşekkürler" closes the conversation once the reply is spoken,
+                    // whether or not the model chose to call end_conversation
+                    if (isThanksOnly(text)) {
+                        finishConversation(null)
+                        sessionEnded = true
+                        break
+                    }
                     // A tool opened another app (chat, video, dialer) that now owns the
                     // screen and audio — don't reopen the mic or pull the panel over it
                     if (uiHandedOff) {
@@ -820,17 +827,29 @@ class AssistantForegroundService : Service() {
             (t.length <= 25 && farewells.any { t.contains(it) })
     }
 
-    private suspend fun finishConversation(farewell: String) {
-        val clean = sanitizeForSpeech(farewell).ifBlank { "Görüşürüz!" }
+    /** @param farewell spoken goodbye; null when the reply was already spoken. */
+    private suspend fun finishConversation(farewell: String?) {
         conversation.clear()
-        overlayAssistant(clean)
-        currentChatId?.let { id ->
-            runCatching { chatHistory.append(id, "assistant", clean) }
+        if (farewell != null) {
+            val clean = sanitizeForSpeech(farewell).ifBlank { "Görüşürüz!" }
+            overlayAssistant(clean)
+            currentChatId?.let { id ->
+                runCatching { chatHistory.append(id, "assistant", clean) }
+            }
+            awaitPhrase()
+            speak(clean)
         }
-        awaitPhrase()
-        speak(clean)
         OverlayService.hide(this)
         updateNotification(computeStatusText())
+    }
+
+    private fun isThanksOnly(text: String): Boolean {
+        val t = text.lowercase(Locale("tr", "TR")).replace(Regex("[^\\p{L} ]"), " ").replace(Regex("\\s+"), " ").trim()
+        return t in setOf(
+            "teşekkürler", "teşekkür ederim", "çok teşekkürler", "çok teşekkür ederim", "sağ ol", "sağol",
+            "çok sağ ol", "sağ olun", "eyvallah", "tamam teşekkürler", "tamam sağ ol", "teşekkürler sağ ol",
+            "eline sağlık", "tamam teşekkür ederim"
+        )
     }
 
     private fun endCurrentSession() {
