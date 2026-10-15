@@ -26,6 +26,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.deepassist.data.ChatHistoryStore
 import com.deepassist.data.ChatSummary
+import com.deepassist.data.WhatsNew
+import androidx.compose.material3.Surface
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.mutableStateOf
 import com.deepassist.ui.EmptyState
 import com.deepassist.ui.ReadinessCard
 import com.deepassist.ui.ScreenHeader
@@ -46,11 +50,20 @@ fun HomeScreen(
         runCatching { ChatHistoryStore.get(context).list() }.getOrDefault(emptyList())
     }
     val problems = remember(refreshTick) { Readiness.problems(context) }
+    val showWhatsNew = remember { mutableStateOf(WhatsNew.shouldShowCard(context)) }
     val groups = remember(chats) { chats.sortedByDescending { it.updatedAt }.groupBy { dayLabel(it.updatedAt) } }
 
     LazyColumn(Modifier.fillMaxSize()) {
         item { ScreenHeader(title = "deepAssist", subtitle = "Sesli yardımcın") }
         item { ReadinessCard(problems = problems, onFix = onOpenSettings) }
+        if (showWhatsNew.value) {
+            item {
+                WhatsNewCard(onDismiss = {
+                    WhatsNew.dismissCard(context)
+                    showWhatsNew.value = false
+                })
+            }
+        }
 
         if (chats.isEmpty()) {
             item {
@@ -81,6 +94,23 @@ fun HomeScreen(
             }
         }
         item { Spacer(Modifier.height(24.dp)) }
+    }
+}
+
+@Composable
+private fun WhatsNewCard(onDismiss: () -> Unit) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh
+    ) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("2.0'da yenilikler", style = MaterialTheme.typography.headlineSmall)
+            WhatsNew.items.forEach { Text("•  $it", style = MaterialTheme.typography.bodyMedium) }
+            TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) { Text("Tamam") }
+        }
     }
 }
 

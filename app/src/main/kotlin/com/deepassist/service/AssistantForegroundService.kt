@@ -30,6 +30,7 @@ import com.deepassist.data.MemoryExtractor
 import com.deepassist.data.SecureStore
 import com.deepassist.data.ToolCall
 import com.deepassist.data.ToolResult
+import com.deepassist.data.WhatsNew
 import com.deepassist.llm.AccumulatingToolCall
 import com.deepassist.llm.DeepSeekClient
 import com.deepassist.llm.SystemPrompt
@@ -319,6 +320,12 @@ class AssistantForegroundService : Service() {
                         Log.i(TAG, "session $generation handed off to another app — closing")
                         sessionEnded = true
                         break
+                    }
+                    // Once per release, after the first finished request: what's new
+                    if (WhatsNew.shouldSpeak(this@AssistantForegroundService)) {
+                        WhatsNew.markSpoken(this@AssistantForegroundService)
+                        DiagLog.event("Session", "spoke what's new")
+                        speak(WhatsNew.SPOKEN)
                     }
                     // Answer done → reopen the microphone for a follow-up command
                 }

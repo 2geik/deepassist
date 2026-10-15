@@ -8,6 +8,9 @@ deepAssist is an experimental Android voice assistant I developed for people who
 
 - Voice input through OpenAI realtime transcription, with a file transcription fallback; spoken replies through OpenAI or Android TTS.
 - Tool based actions for calls, SMS, contacts, WhatsApp, notifications, media, YouTube, timers, device controls, location, weather, exchange rates, and web search.
+- **Camera ("gözüm ol"):** describes what is in front of the user, reads labels, bills and medicine boxes, counts Turkish lira. When reading a page it first guides the hand ("biraz sola çevir") with on-device text detection.
+- **Screen reading:** "ekranda ne yazıyor" reads the app on screen.
+- **Phone control (`use_phone`):** for anything the dedicated tools can't do, an agent reads the screen through the accessibility service and taps, types and scrolls step by step. It asks for a spoken yes before sending a message or paying, never touches passwords, security or accessibility settings, and remembers the way a task was done as a reusable recipe.
 - Local conversation history, saved memories, and notification/message history.
 - Optional Tavily search fallback. Web search also tries Exa and DuckDuckGo without a personal API key.
 
@@ -48,8 +51,17 @@ A build with empty keys can compile, but voice transcription and assistant repli
 
 API endpoint URLs in the source identify public services; the URLs themselves are not credentials. Do not put tokens in URLs, source files, screenshots, issue reports, or logs. If a key was committed previously, deleting it in a later commit does not remove it from Git history: revoke it first.
 
-The app sends voice/text and relevant tool requests to the selected external providers. Chat history, saved memories, and captured notifications/messages are stored in app private files on the phone; they are not encrypted by this project. Android backup is disabled. Granting notification, contacts, SMS, location, and accessibility access exposes sensitive device data to the app and potentially to a tool request. See the manifest and individual tool implementations for exact behavior.
+The app sends voice/text and relevant tool requests to the selected external providers. Camera photos and screenshots exist only in memory for the single request that sends them to DeepSeek; they are never written to storage or logs, and the last photo is kept in memory for at most two minutes for follow-up questions. Chat history, saved memories, and captured notifications/messages are stored in app private files on the phone; they are not encrypted by this project. Android backup is disabled. Granting notification, contacts, SMS, location, and accessibility access exposes sensitive device data to the app and potentially to a tool request. See the manifest and individual tool implementations for exact behavior.
 
 ## Contributing
 
-Open an issue with reproduction steps and Android version, or send a focused pull request. Before submitting, run `./gradlew assembleDebug`, check `git status`, and confirm that no `.env`, `local.properties`, APK, or personal data is staged. There is no automated test suite yet.
+Open an issue with reproduction steps and Android version, or send a focused pull request. Before submitting, run `./gradlew assembleDebug testDebugUnitTest`, check `git status`, and confirm that no `.env`, `local.properties`, APK, or personal data is staged. Unit tests cover the agent's safety rules, camera framing cues, shortcut recipes and tool definitions.
+
+Debug builds accept adb test hooks (DUMP-protected, so only adb can send them):
+
+```bash
+adb shell am broadcast -p com.deepassist -a com.deepassist.DEBUG_PROMPT --es text "'saat kaç'"
+adb shell am broadcast -p com.deepassist -a com.deepassist.DUMP_SCREEN
+```
+
+`adb exec-out run-as com.deepassist cat files/diag.log` shows the on-device event log (triggers, service starts, crashes; no content).
