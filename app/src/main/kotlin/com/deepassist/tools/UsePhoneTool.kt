@@ -6,6 +6,7 @@ import android.util.Log
 import com.deepassist.SessionActivity
 import com.deepassist.agent.PanelControl
 import com.deepassist.agent.ScreenAgent
+import com.deepassist.agent.ShortcutStore
 import com.deepassist.data.ToolProperty
 import com.deepassist.data.ToolResult
 import com.deepassist.llm.DeepSeekClient
@@ -74,8 +75,12 @@ class UsePhoneTool(private val deepSeek: DeepSeekClient) : Tool() {
                 ask = { question -> askUser?.invoke(question) },
                 tick = { playEarcon?.invoke(Earcons.Sound.TICK) }
             )
-            val outcome = agent.run(goal)
-            Log.i(TAG, "goal done=${outcome.success} after ${outcome.steps.size} steps")
+            val shortcuts = ShortcutStore.get(context)
+            val known = shortcuts.match(goal)
+            val outcome = agent.run(goal, hint = known?.steps?.joinToString("\n"))
+            Log.i(TAG, "goal done=${outcome.success} after ${outcome.steps.size} steps, shortcut=${known != null}")
+            if (outcome.success) shortcuts.remember(goal, outcome.steps, known?.id)
+            else if (!outcome.declined) known?.let { shortcuts.failed(it.id) }
             return spoken(outcome.success, outcome.spoken)
         } finally {
             runCatching { if (screenLock?.isHeld == true) screenLock.release() }

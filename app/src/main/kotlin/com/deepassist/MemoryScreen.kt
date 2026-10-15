@@ -31,6 +31,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.deepassist.agent.ShortcutStore
 import com.deepassist.data.MemoryEntry
 import com.deepassist.data.MemoryStore
 import com.deepassist.ui.EmptyState
@@ -47,6 +48,8 @@ fun MemoryScreen() {
     var entries by remember { mutableStateOf(store.list()) }
     var filter by remember { mutableStateOf<String?>(null) }
     var confirmClear by remember { mutableStateOf(false) }
+    val shortcutStore = remember { ShortcutStore.get(context) }
+    var shortcuts by remember { mutableStateOf(shortcutStore.list()) }
 
     val categories = remember(entries) { entries.mapNotNull { categoryOf(it.text) }.distinct().sorted() }
     val shown = entries
@@ -85,22 +88,42 @@ fun MemoryScreen() {
             }
         }
 
-        if (shown.isEmpty()) {
-            EmptyState(
-                title = "Henüz bir şey yok",
-                body = "Asistan konuşmalardan öğrendikçe yakınların, ilgi alanların ve tercihlerin burada görünür."
-            )
-        } else {
-            LazyColumn(Modifier.fillMaxSize()) {
-                items(shown, key = { it.id }) { entry ->
-                    MemoryRow(entry = entry, onDelete = {
-                        store.remove(entry.id)
-                        entries = store.list()
+        LazyColumn(Modifier.fillMaxSize()) {
+            if (shown.isEmpty()) {
+                item {
+                    EmptyState(
+                        title = "Henüz bir şey yok",
+                        body = "Asistan konuşmalardan öğrendikçe yakınların, ilgi alanların ve tercihlerin burada görünür."
+                    )
+                }
+            }
+            items(shown, key = { it.id }) { entry ->
+                MemoryRow(entry = entry, onDelete = {
+                    store.remove(entry.id)
+                    entries = store.list()
+                })
+                HorizontalDivider(Modifier.padding(start = 24.dp, end = 16.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            }
+            if (shortcuts.isNotEmpty()) {
+                item(key = "shortcuts-header") {
+                    Column(Modifier.padding(start = 24.dp, end = 16.dp, top = 24.dp, bottom = 4.dp)) {
+                        Text("Öğrenilen kısayollar", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Telefonda yaptığı işlerin yolunu hatırlar, bir dahakine daha hızlı yapar.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                items(shortcuts, key = { "s-" + it.id }) { shortcut ->
+                    ShortcutRow(shortcut, onDelete = {
+                        shortcutStore.remove(shortcut.id)
+                        shortcuts = shortcutStore.list()
                     })
                     HorizontalDivider(Modifier.padding(start = 24.dp, end = 16.dp), color = MaterialTheme.colorScheme.outlineVariant)
                 }
-                item { Spacer(Modifier.height(24.dp)) }
             }
+            item { Spacer(Modifier.height(24.dp)) }
         }
     }
 
@@ -144,6 +167,28 @@ private fun MemoryRow(entry: MemoryEntry, onDelete: () -> Unit) {
         }
         IconButton(onClick = onDelete) {
             Icon(Icons.Outlined.Delete, contentDescription = "Bu bilgiyi sil", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun ShortcutRow(shortcut: ShortcutStore.Shortcut, onDelete: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(start = 24.dp, end = 8.dp, top = 12.dp, bottom = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(shortcut.goal, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                "${shortcut.steps.size} adım · ${shortcut.uses} kez kullanıldı",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        IconButton(onClick = onDelete) {
+            Icon(Icons.Outlined.Delete, contentDescription = "Bu kısayolu sil", tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

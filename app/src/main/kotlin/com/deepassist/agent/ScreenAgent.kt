@@ -30,7 +30,8 @@ class ScreenAgent(
     private val tick: () -> Unit
 ) {
 
-    data class Outcome(val success: Boolean, val spoken: String, val steps: List<String>)
+    /** [declined]: the user said no to sending or paying — not a failure of the way taken. */
+    data class Outcome(val success: Boolean, val spoken: String, val steps: List<String>, val declined: Boolean = false)
 
     private val actions = ScreenActions(service)
     private val history = mutableListOf<String>()
@@ -144,10 +145,12 @@ class ScreenAgent(
                             val answer = ask(question)
                             history += "$step. Onay soruldu: \"$question\" → cevap: ${answer?.let { "\"$it\"" } ?: "(cevap yok)"}"
                             if (!AgentSafety.isYes(answer)) {
-                                return done(
-                                    false,
-                                    if (sensitive == AgentSafety.Sensitive.MESSAGE) "Tamam, mesajı göndermedim."
-                                    else "Tamam, ödemeyi yapmadım."
+                                return Outcome(
+                                    success = false,
+                                    spoken = if (sensitive == AgentSafety.Sensitive.MESSAGE) "Tamam, mesajı göndermedim."
+                                    else "Tamam, ödemeyi yapmadım.",
+                                    steps = history.toList(),
+                                    declined = true
                                 )
                             }
                             // Confirmed: tap once, never retried automatically
