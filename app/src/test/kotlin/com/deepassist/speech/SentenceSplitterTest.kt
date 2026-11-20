@@ -157,13 +157,31 @@ class SentenceSplitterTest {
     }
 
     @Test
-    fun `clock times lose the leading zero for the voice only`() {
-        assertEquals("Saat 1:12.", SpeechText.forVoice("Saat 01:12."))
-        assertEquals("Saat 7.30'da", SpeechText.forVoice("Saat 07.30'da"))
-        assertEquals("Saat 11:20.", SpeechText.forVoice("Saat 11:20."))
+    fun `clock times are spoken as words`() {
+        assertEquals("Saat bir yirmi iki.", SpeechText.forVoice("Saat 01:22."))
+        assertEquals("Saat on üç sıfır beş.", SpeechText.forVoice("Saat 13:05."))
+        assertEquals("Saat on bir.", SpeechText.forVoice("Saat 11:00."))
+        assertEquals("Saat sıfır kırk beş.", SpeechText.forVoice("Saat 00:45."))
+        assertEquals("Saat yedi otuz'da", SpeechText.forVoice("Saat 07.30'da"))
+        assertEquals("Maç on altı'da", SpeechText.forVoice("Maç 16.00'da"))
+        assertEquals("saat on beş otuz gibi", SpeechText.forVoice("saat 15.30 gibi"))
+    }
+
+    @Test
+    fun `numbers that are not times stay as they are`() {
         assertEquals("15.01.2026", SpeechText.forVoice("15.01.2026"))
         assertEquals("1.05.2026", SpeechText.forVoice("1.05.2026"))
         assertEquals("3.05 lira", SpeechText.forVoice("3.05 lira"))
+        assertEquals("15.30 lira", SpeechText.forVoice("15.30 lira"))
+        assertEquals("Nüfus 1.650 kişi", SpeechText.forVoice("Nüfus 1.650 kişi"))
+        assertEquals("Skor 25:99", SpeechText.forVoice("Skor 25:99"))
+    }
+
+    @Test
+    fun `device time in words`() {
+        assertEquals("bir yirmi iki", TurkishClock.spoken("01:22"))
+        assertEquals("yirmi üç elli dokuz", TurkishClock.spoken("23:59"))
+        assertEquals("on iki", TurkishClock.spoken("12:00"))
     }
 
     @Test

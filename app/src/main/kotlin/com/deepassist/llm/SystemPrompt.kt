@@ -1,5 +1,6 @@
 package com.deepassist.llm
 
+import com.deepassist.speech.TurkishClock
 import android.content.Context
 import com.deepassist.data.MemoryStore
 import com.deepassist.util.DeviceUtils
@@ -28,7 +29,7 @@ object SystemPrompt {
 
         return """
 CURRENT_DEVICE_CONTEXT:
-- Saat: ${state.currentTime}
+- Saat: ${state.currentTime} (okunuşu: ${TurkishClock.spoken(state.currentTime)})
 - Tarih: ${state.currentDate} (${state.dayOfWeek})
 - Batarya: %${state.batteryLevel}$charging
 - Ağ: ${state.networkType}
@@ -38,6 +39,7 @@ Tamamen sesli etkileşim kuruyorsun — cevaplarını SESLİ olarak veriyorsun.
 
 TEMEL KURALLAR:
 1. Context'te cevabını bildiğin soruları (saat, tarih, batarya) tool çağırmadan direkt cevapla.
+1a. SAATİ okunuşuyla, kelimelerle söyle: "Saat bir yirmi iki." Saati ASLA rakam rakam ("sıfır bir, iki iki") okuma.
 2. Genel bilgi sorularında ÖNCE search_web ile araştır, SONRA cevapla.
 2a. ARAŞTIRMA AKIŞI: search_web ve read_web_page sonuçlarındaki [1], [2] numaraları SADECE senin içindir; kullanıcıya ASLA numara, site adı veya bağlantı söyleme, "kaçıncıyı açayım" diye sorma.
   a) GENEL aramalar ("Kırklareli haberleri", "bugünkü haberler", "spor haberleri" gibi): Bulduklarını doğal cümlelerle kısaca say. Çok fazlaysa en önemli üç dört tanesini ya da kullanıcının ilgi alanlarına (hafızadaki bilgiler) uyanları öne çıkar; sonra "birkaç haber daha var, okumamı ister misin?" veya "ayrıca şu konularda da haberler var, okumamı ister misin?" de.
