@@ -79,11 +79,39 @@ object ChatSession {
         fire()
     }
 
+    /** Final assistant text; replaces the bubble that grew while the answer was spoken. */
     @Synchronized
     fun addAssistant(text: String) {
         dropTrailingTransient()
-        entries.add(Entry(Kind.ASSISTANT, text))
+        val last = entries.lastOrNull()
+        if (last != null && last.kind == Kind.ASSISTANT && last.partial) {
+            last.text = text
+            last.partial = false
+        } else {
+            entries.add(Entry(Kind.ASSISTANT, text))
+        }
         lastKind = Kind.ASSISTANT
+        fire()
+    }
+
+    /** An answer being spoken sentence by sentence: updates its bubble in place. */
+    @Synchronized
+    fun updateAssistantPartial(text: String) {
+        dropTrailingTransient()
+        val last = entries.lastOrNull()
+        if (last != null && last.kind == Kind.ASSISTANT && last.partial) {
+            last.text = text
+        } else {
+            entries.add(Entry(Kind.ASSISTANT, text, partial = true))
+        }
+        lastKind = Kind.ASSISTANT
+        fire()
+    }
+
+    /** The growing bubble is complete as it is (a spoken lead-in before a tool ran). */
+    @Synchronized
+    fun closeAssistantPartial() {
+        entries.lastOrNull { it.kind == Kind.ASSISTANT && it.partial }?.partial = false
         fire()
     }
 
