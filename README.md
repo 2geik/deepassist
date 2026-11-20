@@ -6,7 +6,7 @@ deepAssist is an experimental Android voice assistant I developed for people who
 
 ## What it does
 
-- Voice input through OpenAI realtime transcription, with a file transcription fallback; spoken replies through OpenAI or Android TTS.
+- Voice input through OpenAI realtime transcription. When OpenAI is unavailable (no credit, rejected key, no connection) Android's own speech recognizer takes over, and after a quota or key error OpenAI speech is skipped for 10 minutes; file transcription is the last resort. Spoken replies through OpenAI or Android TTS.
 - Tool based actions for calls, SMS, contacts, WhatsApp, notifications, media, YouTube, timers, device controls, location, weather, exchange rates, and web search.
 - **Camera ("gözüm ol"):** describes what is in front of the user, reads labels, bills and medicine boxes, counts Turkish lira. When reading a page it first guides the hand ("biraz sola çevir") with on-device text detection.
 - **Screen reading:** "ekranda ne yazıyor" reads the app on screen.
@@ -62,6 +62,9 @@ Debug builds accept adb test hooks (DUMP-protected, so only adb can send them):
 ```bash
 adb shell am broadcast -p com.deepassist -a com.deepassist.DEBUG_PROMPT --es text "'saat kaç'"
 adb shell am broadcast -p com.deepassist -a com.deepassist.DUMP_SCREEN
+adb shell am broadcast -p com.deepassist -a com.deepassist.DEBUG_STT --es mode android
 ```
+
+`DEBUG_STT` modes: `android` uses Android's recognizer even while OpenAI works, `invalid_key` sends a rejected OpenAI key (speech then falls back to Android STT and TTS), `auto` restores the normal order.
 
 `adb exec-out run-as com.deepassist cat files/diag.log` shows the on-device event log (triggers, service starts, crashes; no content).

@@ -44,7 +44,8 @@ class OpenAiTts(private val apiKeyProvider: () -> String) {
      */
     suspend fun speak(text: String): Boolean = withContext(Dispatchers.IO) {
         val apiKey = apiKeyProvider()
-        if (apiKey.isBlank() || text.isBlank()) return@withContext false
+        // After a quota/auth error the on-device voice speaks for the cooldown
+        if (apiKey.isBlank() || text.isBlank() || OpenAiGate.isBlocked()) return@withContext false
 
         var track: AudioTrack? = null
         var playedAnything = false
@@ -64,7 +65,10 @@ class OpenAiTts(private val apiKeyProvider: () -> String) {
             currentCall = call
 
             call.execute().use { resp ->
-                if (!resp.isSuccessful) return@withContext false
+                if (!resp.isSuccessful) {
+                    OpenAiGate.fromHttpCode(resp.code)?.let { OpenAiGate.report("tts", it) }
+                    return@withContext false
+                }
                 val source = resp.body?.byteStream() ?: return@withContext false
 
                 val minBuf = AudioTrack.getMinBufferSize(

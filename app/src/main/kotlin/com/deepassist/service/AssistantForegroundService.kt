@@ -35,8 +35,10 @@ import com.deepassist.llm.AccumulatingToolCall
 import com.deepassist.llm.DeepSeekClient
 import com.deepassist.llm.SystemPrompt
 import com.deepassist.llm.ToolParser
+import com.deepassist.speech.AndroidStt
 import com.deepassist.speech.AndroidTts
 import com.deepassist.speech.Earcons
+import com.deepassist.speech.OpenAiGate
 import com.deepassist.speech.OpenAiTts
 import com.deepassist.speech.RealtimeStt
 import com.deepassist.speech.RealtimeSttResult
@@ -77,7 +79,7 @@ import kotlinx.coroutines.withTimeoutOrNull
  * Central orchestrator — cascaded STT → DeepSeek LLM → Android TTS.
  *
  * Flow (per turn):
- *   listenAndTranscribe() → DeepSeek streamChat() → (tool calls? execute,
+ *   transcribe() → DeepSeek streamChat() → (tool calls? execute,
  *   feed results back, repeat) → speak the final answer → reopen mic for
  *   a follow-up command.
  */
@@ -101,8 +103,9 @@ class AssistantForegroundService : Service() {
     private lateinit var androidTts: AndroidTts
     private lateinit var earcons: Earcons
 
-    // STT: realtime streaming session is the primary path, multipart is the fallback
+    // STT: OpenAI realtime first, then Android's recognizer, multipart OpenAI last
     private lateinit var realtimeStt: RealtimeStt
+    private lateinit var androidStt: AndroidStt
     private lateinit var stt: SpeechToText
 
     @Volatile private var currentSessionJob: Job? = null
@@ -127,6 +130,11 @@ class AssistantForegroundService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /** The OpenAI key for speech; debug builds can swap in a rejected one to test the fallback. */
+    private fun openAiKey(): String =
+        if (BuildConfig.DEBUG && debugSttMode == STT_MODE_INVALID_KEY) "sk-invalid-debug-key"
+        else secureStore.openAiApiKey
+
     override fun onCreate() {
         super.onCreate()
         DiagLog.event("Service", "onCreate")
@@ -137,11 +145,12 @@ class AssistantForegroundService : Service() {
         conversation = ConversationManager()
         deepSeek = DeepSeekClient { secureStore.deepseekApiKey }
         memoryExtractor = MemoryExtractor(this, deepSeek)
-        openAiTts = OpenAiTts { secureStore.openAiApiKey }
+        openAiTts = OpenAiTts { openAiKey() }
         androidTts = AndroidTts(this)
         earcons = Earcons(this)
-        realtimeStt = RealtimeStt { secureStore.openAiApiKey }
-        stt = SpeechToText { secureStore.openAiApiKey }
+        realtimeStt = RealtimeStt { openAiKey() }
+        androidStt = AndroidStt(this)
+        stt = SpeechToText { openAiKey() }
         toolRegistry = ToolRegistry({ question -> askUser(question) }, deepSeek)
         Tool.playEarcon = { earcons.play(it) }
         Tool.say = { text -> awaitPhrase(); speak(text) }
@@ -277,12 +286,12 @@ class AssistantForegroundService : Service() {
                         debugPrompt
                     } else {
                         startListeningFeedback("Dinliyorum...")
-                        listenAndTranscribe().also { earcon(open = false) }
+                        transcribe { partial -> overlayUserPartial(partial) }.also { earcon(open = false) }
                     }
 
                     if (text.isNullOrBlank()) {
                         if (turn == 1) {
-                            val hint = if (!secureStore.hasOpenAiKey()) {
+                            val hint = if (!secureStore.hasOpenAiKey() && !androidStt.isAvailable()) {
                                 "Bu sürüm OpenAI anahtarı olmadan derlenmiş, seni duyamıyorum."
                             } else if (!secureStore.hasDeepSeekKey()) {
                                 "Bu sürüm DeepSeek anahtarı olmadan derlenmiş, cevap veremiyorum."
@@ -374,39 +383,57 @@ class AssistantForegroundService : Service() {
     // STT
     // ==================================================================
 
-    private suspend fun listenAndTranscribe(): String? {
+    /**
+     * The one STT chain, for requests and for ask_user answers:
+     *  1. OpenAI realtime (audio streams while the user talks, transcript types live);
+     *  2. Android's SpeechRecognizer when realtime is unavailable — and directly,
+     *     without trying OpenAI, while [OpenAiGate] is open after a quota/auth error;
+     *  3. multipart OpenAI as the last resort when the phone has no recognizer.
+     *
+     * @param onPartial live transcript for the panel; null for ask_user answers.
+     */
+    private suspend fun transcribe(onPartial: ((String) -> Unit)?): String? {
         if (!PermissionsHelper.hasMicrophone(this)) return null
+        val partial: (String) -> Unit = { text -> onPartial?.invoke(text) }
 
-        // Primary path: realtime streaming STT — audio uploads while the user
-        // is still talking and the transcript types into the overlay live
-        if (secureStore.hasOpenAiKey()) {
-            when (val result = realtimeStt.listen { partial -> overlayUserPartial(partial) }) {
+        val forceAndroid = BuildConfig.DEBUG && debugSttMode == STT_MODE_ANDROID
+        var fallbackReason = when {
+            forceAndroid -> "forced"
+            !secureStore.hasOpenAiKey() -> "no key"
+            OpenAiGate.isBlocked() -> "breaker open"
+            else -> null
+        }
+        if (fallbackReason == null) {
+            when (val result = realtimeStt.listen(partial)) {
                 is RealtimeSttResult.Final -> return result.text
                 is RealtimeSttResult.NoSpeech -> return null
-                is RealtimeSttResult.Unavailable -> Unit // fall back to multipart below
+                is RealtimeSttResult.Unavailable -> {
+                    OpenAiGate.report("stt", result.reason)
+                    fallbackReason = result.reason.name.lowercase(Locale.ROOT)
+                    // It failed while connecting: the user hasn't spoken yet and the
+                    // recognizer below just keeps listening. Mid-sentence, the words are
+                    // lost — the listening chime asks for them again.
+                    if (result.heardSpeech) earcon(open = true)
+                }
             }
         }
 
-        val audio = recordAudio() ?: return null
-        updateNotification("Anlıyorum...")
-        overlayStatus("Anlıyorum...")
-        val text = stt.transcribe(audio, "tr")
-        audio.delete()
-        return text
-    }
-
-    /** STT for ask_user — primary path: realtime streaming websocket,
-     *  fallback: multipart to /v1/audio/transcriptions. */
-    private suspend fun transcribeWithFallback(): String? {
-        if (!PermissionsHelper.hasMicrophone(this)) return null
-        if (secureStore.hasOpenAiKey()) {
-            when (val result = realtimeStt.listen { /* no partial — question asked */ }) {
+        if (androidStt.isAvailable()) {
+            DiagLog.event("Speech", "STT fallback android ($fallbackReason)")
+            when (val result = androidStt.listen(partial)) {
                 is RealtimeSttResult.Final -> return result.text
                 is RealtimeSttResult.NoSpeech -> return null
-                is RealtimeSttResult.Unavailable -> Unit // fall through
+                is RealtimeSttResult.Unavailable -> Unit // last resort below
             }
         }
+        if (forceAndroid || !secureStore.hasOpenAiKey() || OpenAiGate.isBlocked()) return null
+
+        DiagLog.event("Speech", "STT fallback multipart")
         val audio = recordAudio() ?: return null
+        if (onPartial != null) {
+            updateNotification("Anlıyorum...")
+            overlayStatus("Anlıyorum...")
+        }
         val text = stt.transcribe(audio, "tr")
         audio.delete()
         return text
@@ -748,7 +775,7 @@ class AssistantForegroundService : Service() {
         if (!listening.compareAndSet(false, true)) return
         try {
             startListeningFeedback("Cevabını dinliyorum...")
-            val text = transcribeWithFallback()
+            val text = transcribe(onPartial = null)
             earcon(open = false)
             if (!text.isNullOrBlank()) overlayUser(text)
             val cont = pendingQuestion
@@ -1165,6 +1192,17 @@ class AssistantForegroundService : Service() {
         const val ACTION_DEBUG_PROMPT = "com.deepassist.DEBUG_PROMPT"
         const val EXTRA_DEBUG_TEXT = "text"
         const val EXTRA_RESUME_CHAT_ID = "resume_chat_id"
+
+        const val STT_MODE_AUTO = "auto"
+        const val STT_MODE_ANDROID = "android"
+        const val STT_MODE_INVALID_KEY = "invalid_key"
+
+        /**
+         * Debug builds: "android" skips OpenAI STT so the fallback can be tested while
+         * OpenAI works; "invalid_key" sends a rejected key to OpenAI STT and TTS.
+         */
+        @Volatile
+        var debugSttMode = STT_MODE_AUTO
 
         private const val TAG = "AssistantFgs"
 

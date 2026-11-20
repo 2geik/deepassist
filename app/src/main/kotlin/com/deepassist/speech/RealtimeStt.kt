@@ -28,8 +28,15 @@ sealed class RealtimeSttResult {
     /** Connected fine but the user said nothing intelligible. */
     object NoSpeech : RealtimeSttResult()
 
-    /** Could not connect or stream — caller should fall back to multipart STT. */
-    object Unavailable : RealtimeSttResult()
+    /**
+     * Could not connect or stream — the caller falls back to another recognizer.
+     * [heardSpeech] is false when it failed before the user started talking (e.g. while
+     * connecting), so the fallback can simply keep listening.
+     */
+    data class Unavailable(
+        val reason: OpenAiFailure = OpenAiFailure.OTHER,
+        val heardSpeech: Boolean = false
+    ) : RealtimeSttResult()
 }
 
 /**
@@ -51,11 +58,14 @@ class RealtimeStt(private val apiKeyProvider: () -> String) {
     @SuppressLint("MissingPermission")
     suspend fun listen(onPartial: (String) -> Unit): RealtimeSttResult = withContext(Dispatchers.IO) {
         val apiKey = apiKeyProvider()
-        if (apiKey.isBlank()) return@withContext RealtimeSttResult.Unavailable
+        if (apiKey.isBlank()) return@withContext RealtimeSttResult.Unavailable()
 
-        val recorder = createRecorder() ?: return@withContext RealtimeSttResult.Unavailable
+        val recorder = createRecorder() ?: return@withContext RealtimeSttResult.Unavailable()
         val events = Channel<String>(Channel.UNLIMITED)
         var ws: WebSocket? = null
+        // Why the socket closed, set by the listener before it closes [events]
+        val failure = java.util.concurrent.atomic.AtomicReference(OpenAiFailure.OTHER)
+        var heardSpeech = false
 
         try {
             val request = Request.Builder()
@@ -68,6 +78,10 @@ class RealtimeStt(private val apiKeyProvider: () -> String) {
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    // A refused handshake carries the HTTP status (401 bad key, 429 no credit)
+                    val reason = response?.code?.let { OpenAiGate.fromHttpCode(it) }
+                        ?: if (response == null && t is java.io.IOException) OpenAiFailure.NETWORK else null
+                    reason?.let { failure.set(it) }
                     events.close()
                 }
 
@@ -110,7 +124,6 @@ class RealtimeStt(private val apiKeyProvider: () -> String) {
                 }
 
                 val partial = StringBuilder()
-                var heardSpeech = false
                 var result: RealtimeSttResult? = null
                 val start = SystemClock.elapsedRealtime()
 
@@ -129,7 +142,7 @@ class RealtimeStt(private val apiKeyProvider: () -> String) {
                                 }
                             }
                         }
-                        tick.isClosed -> result = RealtimeSttResult.Unavailable
+                        tick.isClosed -> result = RealtimeSttResult.Unavailable(failure.get(), heardSpeech)
                         else -> {
                             val obj = runCatching {
                                 gson.fromJson(tick.getOrNull(), JsonObject::class.java)
@@ -154,7 +167,14 @@ class RealtimeStt(private val apiKeyProvider: () -> String) {
                                     }
                                 }
 
-                                "error" -> result = RealtimeSttResult.Unavailable
+                                "error" -> {
+                                    // Only the error's code/type is inspected, never logged
+                                    val err = obj.get("error")?.toString().orEmpty()
+                                    result = RealtimeSttResult.Unavailable(
+                                        OpenAiGate.fromErrorText(err),
+                                        heardSpeech
+                                    )
+                                }
                             }
                         }
                     }
@@ -164,7 +184,10 @@ class RealtimeStt(private val apiKeyProvider: () -> String) {
             }
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
-            RealtimeSttResult.Unavailable
+            RealtimeSttResult.Unavailable(
+                if (e is java.io.IOException) OpenAiFailure.NETWORK else failure.get(),
+                heardSpeech
+            )
         } finally {
             runCatching { ws?.cancel() }
             runCatching { recorder.release() }
