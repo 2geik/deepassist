@@ -43,7 +43,7 @@ object Net {
 
     private val cache = ConcurrentHashMap<String, Entry>()
     private val refreshing = ConcurrentHashMap.newKeySet<String>()
-    private val resolver = Executors.newFixedThreadPool(2) { r -> Thread(r, "dns-refresh").apply { isDaemon = true } }
+    private val resolver = Executors.newFixedThreadPool(4) { r -> Thread(r, "dns-refresh").apply { isDaemon = true } }
 
     @Volatile
     private var prefs: SharedPreferences? = null
@@ -211,6 +211,11 @@ object Net {
     /** Answers older than this are not used without a fresh lookup. */
     private const val MAX_AGE_MS = 24 * 60 * 60 * 1000L
 
-    /** The hosts the assistant needs for every request. */
-    val API_HOSTS = arrayOf("api.deepseek.com", "api.meta.ai", "api.openai.com")
+    /** Hosts resolved ahead of time: every request, then the lookup tools. */
+    val API_HOSTS = arrayOf(
+        "api.deepseek.com", "api.meta.ai", "api.openai.com",
+        "mcp.exa.ai", "html.duckduckgo.com", "api.duckduckgo.com", "api.tavily.com",
+        "api.open-meteo.com", "geocoding-api.open-meteo.com", "open.er-api.com",
+        "www.youtube.com", "music.youtube.com"
+    )
 }

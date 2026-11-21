@@ -1,5 +1,6 @@
 package com.deepassist.tools
 
+import com.deepassist.util.Net.forApi
 import android.location.Geocoder
 import android.util.Log
 import com.deepassist.data.ToolProperty
@@ -292,7 +293,7 @@ class WeatherTool : Tool() {
         private const val TAG = "WeatherTool"
 
         private val httpClient: OkHttpClient by lazy {
-            OkHttpClient.Builder()
+            OkHttpClient.Builder().forApi("weather")
                 .connectTimeout(10, TimeUnit.SECONDS)
                 .readTimeout(10, TimeUnit.SECONDS)
                 .build()

@@ -1,5 +1,6 @@
 package com.deepassist.tools
 
+import com.deepassist.util.Net.forApi
 import android.util.Log
 import com.google.gson.Gson
 import com.google.gson.JsonObject
@@ -26,7 +27,7 @@ object YoutubeSearchClient {
     private const val KEY_TTL_MS = 6 * 60 * 60 * 1000L
 
     private val gson = Gson()
-    private val client = OkHttpClient.Builder()
+    private val client = OkHttpClient.Builder().forApi("youtube")
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .build()

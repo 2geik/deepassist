@@ -1,5 +1,6 @@
 package com.deepassist.tools
 
+import com.deepassist.util.Net.forApi
 import com.deepassist.data.ToolProperty
 import com.deepassist.data.ToolResult
 import com.google.gson.Gson
@@ -43,7 +44,7 @@ class ExchangeRateTool : Tool() {
     }
 
     private val gson = Gson()
-    private val client = OkHttpClient.Builder()
+    private val client = OkHttpClient.Builder().forApi("exchange")
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
         .build()
