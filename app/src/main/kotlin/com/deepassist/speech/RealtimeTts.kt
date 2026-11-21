@@ -4,6 +4,7 @@ import com.deepassist.util.Net.forApi
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
+import android.media.AudioTimestamp
 import android.media.AudioTrack
 import android.os.SystemClock
 import android.util.Base64
@@ -185,8 +186,9 @@ class RealtimeTts(private val apiKeyProvider: () -> String) {
                     }
 
                     "response.output_audio.delta" -> {
-                        // Events of an earlier, cancelled response are ignored
-                        if (responseId != null && ev.get("response_id")?.asString != responseId) continue
+                        // Only this response's audio: response.created comes first, and late
+                        // audio of an earlier, cancelled response must not be played
+                        if (responseId == null || ev.get("response_id")?.asString != responseId) continue
                         val pcm = Base64.decode(ev.get("delta")?.asString ?: continue, Base64.DEFAULT)
                         val t = track ?: createTrack()?.also {
                             track = it
@@ -204,9 +206,19 @@ class RealtimeTts(private val apiKeyProvider: () -> String) {
                         }
                     }
 
+                    // All audio is here: no need to wait for the transcript and response.done.
+                    // Only events of this response count; a late one of the previous could
+                    // arrive before this response's response.created.
+                    "response.output_audio.done" -> {
+                        if (responseId != null && ev.get("response_id")?.asString == responseId) {
+                            responseActive = false
+                            break
+                        }
+                    }
+
                     "response.done" -> {
                         val id = ev.getAsJsonObject("response")?.get("id")?.asString
-                        if (responseId == null || id == responseId) {
+                        if (responseId != null && id == responseId) {
                             responseActive = false
                             break
                         }
@@ -268,12 +280,32 @@ class RealtimeTts(private val apiKeyProvider: () -> String) {
     }
 
     /** Waits until what was written has been heard (bounded), then stops the track. */
+    /**
+     * Waits until the last written frame has been heard; the track keeps playing what
+     * was written. The end time comes from [AudioTimestamp] (when a given frame comes
+     * out of the speaker), read while the track still plays. The old wait called
+     * stop() first and then polled the head position, which this phone resets on
+     * stop(): every answer was followed by its own length again in silence before the
+     * microphone reopened.
+     */
     private suspend fun drain(t: AudioTrack, frames: Long) {
-        runCatching { t.stop() } // MODE_STREAM: plays out what is buffered
-        val head = { runCatching { t.playbackHeadPosition.toLong() and 0xFFFFFFFFL }.getOrDefault(Long.MAX_VALUE) }
-        val remainingMs = (frames - head()).coerceAtLeast(0) * 1000 / SAMPLE_RATE
-        val deadline = SystemClock.elapsedRealtime() + remainingMs + 400
-        while (!stopRequested && head() < frames && SystemClock.elapsedRealtime() < deadline) delay(20)
+        val ts = AudioTimestamp()
+        val playing = runCatching { t.getTimestamp(ts) }.getOrDefault(false) && ts.framePosition > 0
+        // MODE_STREAM: stop() plays out what was written (and starts a track whose few
+        // frames never filled the buffer, so very short audio is heard too)
+        runCatching { t.stop() }
+        val endNs = if (playing) {
+            ts.nanoTime + (frames - ts.framePosition) * 1_000_000_000L / SAMPLE_RATE
+        } else {
+            // Nothing out yet: all of it plays from now
+            System.nanoTime() + frames * 1_000_000_000L / SAMPLE_RATE + FALLBACK_LATENCY_NS
+        }
+        val tailMs = ((endNs - System.nanoTime()) / 1_000_000L).coerceIn(0L, MAX_DRAIN_MS)
+        DiagLog.event("Speech", "realtime TTS tail $tailMs ms${if (playing) "" else " (no timestamp)"}")
+        val deadline = SystemClock.elapsedRealtime() + tailMs
+        while (!stopRequested && SystemClock.elapsedRealtime() < deadline) {
+            delay(minOf(50L, (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(1L)))
+        }
     }
 
     private fun createTrack(): AudioTrack? = runCatching {
@@ -344,6 +376,12 @@ class RealtimeTts(private val apiKeyProvider: () -> String) {
 
         /** No sound within this (including connecting) → the on-device voice reads it. */
         private const val FIRST_AUDIO_TIMEOUT_MS = 3_000L
+
+        /** Speaker latency assumed when the track gives no timestamp (it reported 380-740 ms). */
+        private const val FALLBACK_LATENCY_NS = 500_000_000L
+
+        /** Never wait longer than this for the last audio to be heard. */
+        private const val MAX_DRAIN_MS = 3_000L
 
         /** 80 ms of silence at 24 kHz PCM16. */
         private const val LEAD_IN_BYTES = SAMPLE_RATE * 2 * 80 / 1000
