@@ -272,6 +272,7 @@ class AssistantForegroundService : Service() {
 
                 var turn = 0
                 var sessionEnded = false
+                var askedToRepeat = false
                 while (isActive && turn < MAX_CONVERSATION_TURNS && !sessionEnded) {
                     turn++
                     runCatching { wakeLock?.acquire(180_000L) }
@@ -284,12 +285,22 @@ class AssistantForegroundService : Service() {
 
                     if (text.isNullOrBlank()) {
                         if (turn == 1) {
+                            // Without the DeepSeek key there is no answer and no ASR fallback
+                            if (secureStore.hasDeepSeekKey() && !askedToRepeat) {
+                                // "Tekrar dener misin?" must really listen again: once
+                                askedToRepeat = true
+                                val again = "Seni anlayamadım, tekrar dener misin?"
+                                overlayAssistant(again)
+                                speak(again)
+                                turn-- // still the first request
+                                continue
+                            }
                             val hint = if (!secureStore.hasOpenAiKey() && !secureStore.hasDeepSeekKey()) {
                                 "Bu sürüm OpenAI ve DeepSeek anahtarı olmadan derlenmiş, seni duyamıyorum."
                             } else if (!secureStore.hasDeepSeekKey()) {
                                 "Bu sürüm DeepSeek anahtarı olmadan derlenmiş, cevap veremiyorum."
                             } else {
-                                "Seni anlayamadım, tekrar dener misin?"
+                                "Seni yine duyamadım, birazdan tekrar dene."
                             }
                             overlayAssistant(hint)
                             speakAsync(hint)

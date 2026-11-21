@@ -6,6 +6,7 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.SystemClock
 import android.util.Base64
+import com.deepassist.util.DiagLog
 import com.google.gson.Gson
 import com.google.gson.JsonObject
 import java.util.concurrent.TimeUnit
@@ -113,54 +114,75 @@ class RealtimeStt(private val apiKeyProvider: () -> String) {
                 var heardSpeech = false
                 var result: RealtimeSttResult? = null
                 val start = SystemClock.elapsedRealtime()
+                // The mic records from the start and OkHttp queues the audio until the
+                // socket is open, so nothing said while connecting is lost. The silence
+                // limits count from the first server event: a slow connection must not
+                // use up the user's 6 seconds.
+                var connectedAt = 0L
 
                 while (result == null) {
                     val tick = withTimeoutOrNull(500) { events.receiveCatching() }
-                    val elapsed = SystemClock.elapsedRealtime() - start
-                    when {
-                        tick == null -> { // no event in this window: check deadlines
-                            if (!heardSpeech && elapsed > NO_SPEECH_TIMEOUT_MS) {
-                                result = RealtimeSttResult.NoSpeech
-                            } else if (elapsed > OVERALL_TIMEOUT_MS) {
-                                result = if (partial.isNotBlank()) {
-                                    RealtimeSttResult.Final(partial.toString().trim())
-                                } else {
-                                    RealtimeSttResult.NoSpeech
-                                }
-                            }
+                    if (tick != null && tick.isClosed) {
+                        result = RealtimeSttResult.Unavailable
+                    } else if (tick != null) {
+                        if (connectedAt == 0L) {
+                            connectedAt = SystemClock.elapsedRealtime()
+                            DiagLog.event("Speech", "realtime connected ${connectedAt - start} ms")
                         }
-                        tick.isClosed -> result = RealtimeSttResult.Unavailable
-                        else -> {
-                            val obj = runCatching {
-                                gson.fromJson(tick.getOrNull(), JsonObject::class.java)
-                            }.getOrNull()
-                            when (obj?.get("type")?.takeIf { it.isJsonPrimitive }?.asString) {
-                                "input_audio_buffer.speech_started" -> heardSpeech = true
-
-                                "conversation.item.input_audio_transcription.delta" -> {
-                                    obj.get("delta")?.takeIf { it.isJsonPrimitive }?.asString?.let {
-                                        partial.append(it)
-                                        if (partial.isNotBlank()) onPartial(partial.toString())
-                                    }
-                                }
-
-                                "conversation.item.input_audio_transcription.completed" -> {
-                                    val text = obj.get("transcript")
-                                        ?.takeIf { it.isJsonPrimitive }?.asString?.trim().orEmpty()
-                                    result = if (text.isBlank()) {
-                                        RealtimeSttResult.NoSpeech
-                                    } else {
-                                        RealtimeSttResult.Final(text)
-                                    }
-                                }
-
-                                "error" -> result = RealtimeSttResult.Unavailable
+                        val obj = runCatching {
+                            gson.fromJson(tick.getOrNull(), JsonObject::class.java)
+                        }.getOrNull()
+                        when (obj?.get("type")?.takeIf { it.isJsonPrimitive }?.asString) {
+                            "input_audio_buffer.speech_started" -> if (!heardSpeech) {
+                                heardSpeech = true
+                                DiagLog.event(
+                                    "Speech",
+                                    "realtime speech started ${SystemClock.elapsedRealtime() - start} ms"
+                                )
                             }
+
+                            "conversation.item.input_audio_transcription.delta" -> {
+                                obj.get("delta")?.takeIf { it.isJsonPrimitive }?.asString?.let {
+                                    partial.append(it)
+                                    if (partial.isNotBlank()) onPartial(partial.toString())
+                                }
+                            }
+
+                            "conversation.item.input_audio_transcription.completed" -> {
+                                val text = obj.get("transcript")
+                                    ?.takeIf { it.isJsonPrimitive }?.asString?.trim().orEmpty()
+                                result = if (text.isBlank()) {
+                                    RealtimeSttResult.NoSpeech
+                                } else {
+                                    RealtimeSttResult.Final(text)
+                                }
+                            }
+
+                            "error" -> result = RealtimeSttResult.Unavailable
+                        }
+                    }
+                    if (result != null) break
+
+                    // Deadlines, checked on every pass (events can keep arriving)
+                    val now = SystemClock.elapsedRealtime()
+                    if (connectedAt == 0L) {
+                        if (now - start > CONNECT_TIMEOUT_MS) {
+                            DiagLog.event("Speech", "realtime connect timeout")
+                            result = RealtimeSttResult.Unavailable
+                        }
+                    } else if (!heardSpeech && now - connectedAt > NO_SPEECH_TIMEOUT_MS) {
+                        DiagLog.event("Speech", "realtime no speech")
+                        result = RealtimeSttResult.NoSpeech
+                    } else if (now - connectedAt > OVERALL_TIMEOUT_MS || now - start > HARD_CAP_MS) {
+                        result = if (partial.isNotBlank()) {
+                            RealtimeSttResult.Final(partial.toString().trim())
+                        } else {
+                            RealtimeSttResult.NoSpeech
                         }
                     }
                 }
                 sendJob.cancel()
-                result
+                result ?: RealtimeSttResult.NoSpeech
             }
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
@@ -284,5 +306,7 @@ class RealtimeStt(private val apiKeyProvider: () -> String) {
     companion object {
         private const val NO_SPEECH_TIMEOUT_MS = 6_000L
         private const val OVERALL_TIMEOUT_MS = 15_000L
+        private const val CONNECT_TIMEOUT_MS = 8_000L
+        private const val HARD_CAP_MS = 25_000L
     }
 }
