@@ -396,7 +396,12 @@ class AssistantForegroundService : Service() {
             when (val result = realtimeStt.listen { partial -> overlayUserPartial(partial) }) {
                 is RealtimeSttResult.Final -> return result.text
                 is RealtimeSttResult.NoSpeech -> return null
-                is RealtimeSttResult.Unavailable -> Unit // fall back to DeepSeek ASR below
+                is RealtimeSttResult.Unavailable -> result.speechPcm24k?.let { pcm ->
+                    // What the user said while OpenAI failed goes to DeepSeek ASR
+                    updateNotification("Anlıyorum...")
+                    overlayStatus("Anlıyorum...")
+                    return transcribeFallback(wav16kFrom24k(pcm))
+                }
             }
         }
 
@@ -414,7 +419,9 @@ class AssistantForegroundService : Service() {
             when (val result = realtimeStt.listen { /* no partial — question asked */ }) {
                 is RealtimeSttResult.Final -> return result.text
                 is RealtimeSttResult.NoSpeech -> return null
-                is RealtimeSttResult.Unavailable -> Unit // fall through
+                is RealtimeSttResult.Unavailable -> result.speechPcm24k?.let { pcm ->
+                    return transcribeFallback(wav16kFrom24k(pcm))
+                }
             }
         }
         val audio = recordAudio() ?: return null
@@ -505,6 +512,29 @@ class AssistantForegroundService : Service() {
         val wav = File(cacheDir, "rec_${System.currentTimeMillis()}.wav")
         writeWav(wav, pcmBytes, sampleRate, channels = 1, bitsPerSample = 16)
         wav
+    }
+
+    /** 24 kHz mono PCM16 from the realtime attempt → a 16 kHz WAV for DeepSeek ASR. */
+    private fun wav16kFrom24k(pcm24k: ByteArray): File {
+        val inSamples = pcm24k.size / 2
+        val outSamples = inSamples * 2 / 3
+        val out = ByteArray(outSamples * 2)
+        fun sample(i: Int): Int {
+            val j = i.coerceIn(0, inSamples - 1) * 2
+            return (pcm24k[j].toInt() and 0xFF) or (pcm24k[j + 1].toInt() shl 8)
+        }
+        for (k in 0 until outSamples) {
+            // Linear interpolation at 1.5 input samples per output sample
+            val pos = k * 3 / 2.0
+            val i = pos.toInt()
+            val frac = pos - i
+            val v = (sample(i) * (1 - frac) + sample(i + 1) * frac).toInt()
+            out[k * 2] = (v and 0xFF).toByte()
+            out[k * 2 + 1] = ((v shr 8) and 0xFF).toByte()
+        }
+        val wav = File(cacheDir, "rec_${System.currentTimeMillis()}.wav")
+        writeWav(wav, out, 16000, channels = 1, bitsPerSample = 16)
+        return wav
     }
 
     private fun writeWav(file: File, pcm: ByteArray, sampleRate: Int, channels: Int, bitsPerSample: Int) {

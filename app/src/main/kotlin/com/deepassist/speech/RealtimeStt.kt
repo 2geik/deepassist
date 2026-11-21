@@ -9,10 +9,14 @@ import android.util.Base64
 import com.deepassist.util.DiagLog
 import com.google.gson.Gson
 import com.google.gson.JsonObject
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -29,8 +33,12 @@ sealed class RealtimeSttResult {
     /** Connected fine but the user said nothing intelligible. */
     object NoSpeech : RealtimeSttResult()
 
-    /** Could not connect or stream — caller should fall back to multipart STT. */
-    object Unavailable : RealtimeSttResult()
+    /**
+     * Could not connect or stream. [speechPcm24k] is what the user said meanwhile
+     * (24 kHz mono PCM16, recorded until they stopped talking), for the fallback
+     * recognizer; null when realtime could not even start (no key, no microphone).
+     */
+    class Unavailable(val speechPcm24k: ByteArray? = null) : RealtimeSttResult()
 }
 
 /**
@@ -52,11 +60,17 @@ class RealtimeStt(private val apiKeyProvider: () -> String) {
     @SuppressLint("MissingPermission")
     suspend fun listen(onPartial: (String) -> Unit): RealtimeSttResult = withContext(Dispatchers.IO) {
         val apiKey = apiKeyProvider()
-        if (apiKey.isBlank()) return@withContext RealtimeSttResult.Unavailable
+        if (apiKey.isBlank()) return@withContext RealtimeSttResult.Unavailable()
 
-        val recorder = createRecorder() ?: return@withContext RealtimeSttResult.Unavailable
+        val recorder = createRecorder() ?: return@withContext RealtimeSttResult.Unavailable()
         val events = Channel<String>(Channel.UNLIMITED)
         var ws: WebSocket? = null
+        // Everything the mic hears is also kept here, so a failed connection doesn't
+        // lose the request: it goes to the fallback recognizer instead
+        val captured = ByteArrayOutputStream()
+        val firstLoudAt = AtomicLong(0L)
+        val lastLoudAt = AtomicLong(0L)
+        val failureNote = AtomicReference<String?>(null)
 
         try {
             val request = Request.Builder()
@@ -69,6 +83,7 @@ class RealtimeStt(private val apiKeyProvider: () -> String) {
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    failureNote.set(t.javaClass.simpleName + (response?.code?.let { " HTTP $it" } ?: ""))
                     events.close()
                 }
 
@@ -80,6 +95,7 @@ class RealtimeStt(private val apiKeyProvider: () -> String) {
             socket.send(gson.toJson(sessionConfig()))
 
             coroutineScope {
+                var socketOpen = true
                 val sendJob = launch {
                     val buf = ShortArray(recorder.sampleRate / 10) // 100ms chunks
                     recorder.startRecording()
@@ -93,17 +109,23 @@ class RealtimeStt(private val apiKeyProvider: () -> String) {
                                 if (a > peak) peak = a
                             }
                             com.deepassist.service.VoiceActivity.reportPeak(peak)
-                            val append = JsonObject().apply {
-                                addProperty("type", "input_audio_buffer.append")
-                                addProperty(
-                                    "audio",
-                                    Base64.encodeToString(
-                                        to24kPcmBytes(buf, read, recorder.sampleRate),
-                                        Base64.NO_WRAP
-                                    )
-                                )
+                            val pcm = to24kPcmBytes(buf, read, recorder.sampleRate)
+                            synchronized(captured) {
+                                if (captured.size() < MAX_CAPTURE_BYTES) captured.write(pcm)
                             }
-                            if (!socket.send(gson.toJson(append))) break
+                            if (peak >= LOCAL_SPEECH_PEAK) {
+                                val now = SystemClock.elapsedRealtime()
+                                firstLoudAt.compareAndSet(0L, now)
+                                lastLoudAt.set(now)
+                            }
+                            // Keep recording when the socket is gone: the fallback needs it
+                            if (socketOpen) {
+                                val append = JsonObject().apply {
+                                    addProperty("type", "input_audio_buffer.append")
+                                    addProperty("audio", Base64.encodeToString(pcm, Base64.NO_WRAP))
+                                }
+                                socketOpen = socket.send(gson.toJson(append))
+                            }
                         }
                     } finally {
                         runCatching { recorder.stop() }
@@ -119,11 +141,35 @@ class RealtimeStt(private val apiKeyProvider: () -> String) {
                 // limits count from the first server event: a slow connection must not
                 // use up the user's 6 seconds.
                 var connectedAt = 0L
+                // Realtime failed: keep listening locally, then hand the audio over
+                var failed = false
+
+                fun fail(why: String) {
+                    failed = true
+                    socketOpen = false
+                    runCatching { socket.cancel() }
+                    DiagLog.event("Speech", "realtime unavailable: $why")
+                }
 
                 while (result == null) {
+                    if (failed) {
+                        // Local finish: wait until the user is done talking (or clearly silent)
+                        delay(100)
+                        val now = SystemClock.elapsedRealtime()
+                        val first = firstLoudAt.get()
+                        result = when {
+                            first == 0L && now - start > LOCAL_NO_SPEECH_MS -> RealtimeSttResult.NoSpeech
+                            first == 0L -> null
+                            now - lastLoudAt.get() >= LOCAL_END_SILENCE_MS || now - start > HARD_CAP_MS ->
+                                RealtimeSttResult.Unavailable(synchronized(captured) { captured.toByteArray() })
+                            else -> null
+                        }
+                        continue
+                    }
+
                     val tick = withTimeoutOrNull(500) { events.receiveCatching() }
                     if (tick != null && tick.isClosed) {
-                        result = RealtimeSttResult.Unavailable
+                        fail(failureNote.get() ?: "closed")
                     } else if (tick != null) {
                         if (connectedAt == 0L) {
                             connectedAt = SystemClock.elapsedRealtime()
@@ -158,17 +204,26 @@ class RealtimeStt(private val apiKeyProvider: () -> String) {
                                 }
                             }
 
-                            "error" -> result = RealtimeSttResult.Unavailable
+                            // Only the error's code is logged, never content
+                            "error" -> fail(
+                                "error " + (
+                                    obj.getAsJsonObject("error")?.get("code")
+                                        ?.takeIf { it.isJsonPrimitive }?.asString ?: "?"
+                                    )
+                            )
                         }
                     }
-                    if (result != null) break
+                    if (result != null || failed) continue
 
                     // Deadlines, checked on every pass (events can keep arriving)
                     val now = SystemClock.elapsedRealtime()
+                    val userDone = firstLoudAt.get() != 0L && now - lastLoudAt.get() >= LOCAL_END_SILENCE_MS
                     if (connectedAt == 0L) {
                         if (now - start > CONNECT_TIMEOUT_MS) {
-                            DiagLog.event("Speech", "realtime connect timeout")
-                            result = RealtimeSttResult.Unavailable
+                            fail("connect timeout")
+                        } else if (now - start > EARLY_FALLBACK_MS && userDone) {
+                            // The user already finished talking and OpenAI still isn't there
+                            fail("slow connect, user done")
                         }
                     } else if (!heardSpeech && now - connectedAt > NO_SPEECH_TIMEOUT_MS) {
                         DiagLog.event("Speech", "realtime no speech")
@@ -186,7 +241,8 @@ class RealtimeStt(private val apiKeyProvider: () -> String) {
             }
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
-            RealtimeSttResult.Unavailable
+            DiagLog.event("Speech", "realtime failed ${e.javaClass.simpleName}")
+            RealtimeSttResult.Unavailable()
         } finally {
             runCatching { ws?.cancel() }
             runCatching { recorder.release() }
@@ -307,6 +363,17 @@ class RealtimeStt(private val apiKeyProvider: () -> String) {
         private const val NO_SPEECH_TIMEOUT_MS = 6_000L
         private const val OVERALL_TIMEOUT_MS = 15_000L
         private const val CONNECT_TIMEOUT_MS = 8_000L
+
+        /** Not connected yet, but the user finished talking this long ago: use the fallback. */
+        private const val EARLY_FALLBACK_MS = 4_000L
+        private const val LOCAL_END_SILENCE_MS = 1_500L
+        private const val LOCAL_NO_SPEECH_MS = 8_000L
+
+        /** Peak (PCM16) that counts as the user talking for the local fallback recording. */
+        private const val LOCAL_SPEECH_PEAK = 1_000
+
+        /** 25 s of 24 kHz PCM16 at most. */
+        private const val MAX_CAPTURE_BYTES = 24_000 * 2 * 25
         private const val HARD_CAP_MS = 25_000L
     }
 }
