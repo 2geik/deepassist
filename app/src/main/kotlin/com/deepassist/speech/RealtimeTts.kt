@@ -64,6 +64,10 @@ class RealtimeTts(private val apiKeyProvider: () -> String) {
     @Volatile
     private var stopRequested = false
 
+    /** A response.create was sent and its response.done hasn't arrived. */
+    @Volatile
+    private var responseActive = false
+
     private inner class Connection(apiKey: String) {
         val ready = CompletableDeferred<Boolean>()
         @Volatile var closed = false
@@ -160,6 +164,7 @@ class RealtimeTts(private val apiKeyProvider: () -> String) {
         var played = false
         var responseId: String? = null
         try {
+            responseActive = true
             c.send(responseCreate(text.take(MAX_CHARS)))
             while (true) {
                 val waitMs = if (played) null else FIRST_AUDIO_TIMEOUT_MS - (SystemClock.elapsedRealtime() - start)
@@ -201,7 +206,10 @@ class RealtimeTts(private val apiKeyProvider: () -> String) {
 
                     "response.done" -> {
                         val id = ev.getAsJsonObject("response")?.get("id")?.asString
-                        if (responseId == null || id == responseId) break
+                        if (responseId == null || id == responseId) {
+                            responseActive = false
+                            break
+                        }
                     }
 
                     "error" -> {
@@ -218,6 +226,7 @@ class RealtimeTts(private val apiKeyProvider: () -> String) {
             cancelResponse(c, responseId)
             throw e
         } finally {
+            responseActive = false
             c.sink = null
             currentEvents = null
             track?.let {
@@ -230,8 +239,8 @@ class RealtimeTts(private val apiKeyProvider: () -> String) {
     /** Cuts the current utterance (session end, audio focus loss, watchdog); keeps the session. */
     fun stop() {
         stopRequested = true
-        // Only a response that is playing can be cancelled (else the API answers with an error)
-        if (currentEvents != null) conn?.let { cancelResponse(it, null) }
+        // Only a response still being generated can be cancelled (else the API logs an error)
+        if (responseActive) conn?.let { cancelResponse(it, null) }
         currentEvents?.close()
         currentTrack?.let {
             runCatching { it.pause() }

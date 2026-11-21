@@ -11,6 +11,11 @@ import java.net.Proxy
 import java.net.UnknownHostException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
+import com.google.gson.JsonParser
+import okhttp3.HttpUrl
+import okhttp3.Request
 import okhttp3.Call
 import okhttp3.Dns
 import okhttp3.EventListener
@@ -31,8 +36,11 @@ import okhttp3.Protocol
  * took 30 s (the router's resolver, fe80::1, doesn't answer), TCP 19 ms, TLS
  * 44 ms. Answers are kept (also across restarts) and used at once; lookups run
  * in the background ([prefetch] at service and session start, and whenever a
- * cached answer is older than [REFRESH_AFTER_MS]). Only a host never resolved
- * before waits for the system resolver.
+ * cached answer is older than [REFRESH_AFTER_MS]). A host not in the cache is
+ * asked from the system resolver and from Cloudflare's DNS over HTTPS (1.1.1.1,
+ * reached by IP, already the phone's second DNS server) at the same time; the
+ * first answer wins. Web pages the assistant reads are on hosts never seen
+ * before, so this is what keeps them from waiting 30 s.
  *
  * Trace: one DiagLog line per call that opened a new connection or was slow —
  * host and phase durations only (DNS, TCP and family, TLS, response headers).
@@ -43,7 +51,14 @@ object Net {
 
     private val cache = ConcurrentHashMap<String, Entry>()
     private val refreshing = ConcurrentHashMap.newKeySet<String>()
-    private val resolver = Executors.newFixedThreadPool(4) { r -> Thread(r, "dns-refresh").apply { isDaemon = true } }
+    // A lookup on the broken resolver holds its thread for up to 30 s
+    private val resolver = Executors.newFixedThreadPool(8) { r -> Thread(r, "dns").apply { isDaemon = true } }
+
+    /** Talks to 1.1.1.1 by IP: no DNS needed to reach it. */
+    private val dohClient = OkHttpClient.Builder()
+        .connectTimeout(3, TimeUnit.SECONDS)
+        .readTimeout(3, TimeUnit.SECONDS)
+        .build()
 
     @Volatile
     private var prefs: SharedPreferences? = null
@@ -89,15 +104,53 @@ object Net {
 
     private fun resolveNow(host: String): List<InetAddress> {
         val start = SystemClock.elapsedRealtime()
-        val addrs = Dns.SYSTEM.lookup(host).sortedBy { if (it is Inet4Address) 0 else 1 }
+        val (addrs, via) = race(host)
         val ms = SystemClock.elapsedRealtime() - start
-        if (ms >= SLOW_DNS_MS) DiagLog.event("Net", "dns $host $ms ms")
+        if (ms >= SLOW_DNS_MS || via != "system") DiagLog.event("Net", "dns $host $ms ms via $via")
         if (addrs.isNotEmpty()) {
             val now = System.currentTimeMillis()
             cache[host] = Entry(addrs, now)
             prefs?.edit()?.putString(host, addrs.joinToString(",") { it.hostAddress.orEmpty() } + "|" + now)?.apply()
         }
         return addrs
+    }
+
+    /** System resolver and DNS over HTTPS at once; the first non-empty answer, IPv4 first. */
+    private fun race(host: String): Pair<List<InetAddress>, String> {
+        val answers = LinkedBlockingQueue<Pair<Result<List<InetAddress>>, String>>()
+        resolver.execute { answers.offer(runCatching { Dns.SYSTEM.lookup(host) } to "system") }
+        resolver.execute { answers.offer(runCatching { dohLookup(host) } to "doh") }
+        val deadline = SystemClock.elapsedRealtime() + RACE_TIMEOUT_MS
+        var lastError: Throwable? = null
+        repeat(2) {
+            val left = deadline - SystemClock.elapsedRealtime()
+            val (result, via) = answers.poll(left.coerceAtLeast(1L), TimeUnit.MILLISECONDS) ?: return@repeat
+            val list = result.getOrNull()
+            if (!list.isNullOrEmpty()) return list.sortedBy { if (it is Inet4Address) 0 else 1 } to via
+            lastError = result.exceptionOrNull() ?: lastError
+        }
+        throw UnknownHostException("$host: no answer").apply { lastError?.let { initCause(it) } }
+    }
+
+    /** Cloudflare DNS over HTTPS, JSON form: A records, else AAAA. */
+    private fun dohLookup(host: String): List<InetAddress> {
+        for (type in listOf("A", "AAAA")) {
+            val url = HttpUrl.Builder().scheme("https").host("1.1.1.1").addPathSegment("dns-query")
+                .addQueryParameter("name", host).addQueryParameter("type", type).build()
+            val request = Request.Builder().url(url).header("accept", "application/dns-json").build()
+            val body = dohClient.newCall(request).execute().use { if (it.isSuccessful) it.body?.string() else null }
+                ?: continue
+            val wanted = if (type == "A") 1 else 28
+            val addrs = JsonParser.parseString(body).asJsonObject.getAsJsonArray("Answer")
+                ?.mapNotNull { a ->
+                    val o = a.asJsonObject
+                    if (o.get("type")?.asInt != wanted) return@mapNotNull null
+                    // IP literal: no DNS query
+                    runCatching { InetAddress.getByName(o.get("data").asString) }.getOrNull()
+                }.orEmpty()
+            if (addrs.isNotEmpty()) return addrs
+        }
+        throw UnknownHostException("$host: no DoH answer")
     }
 
     /** Cached answers at once (refreshed in the background), IPv4 first. */
@@ -203,6 +256,7 @@ object Net {
 
     private const val SLOW_MS = 2_000L
     private const val SLOW_DNS_MS = 1_000L
+    private const val RACE_TIMEOUT_MS = 10_000L
     private const val PREFS = "dns_cache"
 
     /** A cached answer older than this is refreshed in the background (still used meanwhile). */
