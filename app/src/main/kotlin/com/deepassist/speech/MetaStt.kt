@@ -1,5 +1,6 @@
 package com.deepassist.speech
 
+import com.deepassist.util.Net.forApi
 import android.os.SystemClock
 import com.deepassist.service.VoiceActivity
 import com.deepassist.util.DiagLog
@@ -38,7 +39,7 @@ import okio.ByteString.Companion.toByteString
 class MetaStt(private val apiKeyProvider: () -> String) {
 
     private val gson = Gson()
-    private val client = OkHttpClient.Builder()
+    private val client = OkHttpClient.Builder().forApi("meta-stt")
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS) // stays open while listening
         .build()

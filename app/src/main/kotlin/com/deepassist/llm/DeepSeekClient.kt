@@ -1,5 +1,8 @@
 package com.deepassist.llm
 
+import android.os.SystemClock
+import com.deepassist.util.DiagLog
+import com.deepassist.util.Net.forApi
 import com.deepassist.data.CompletionResponse
 import com.deepassist.data.Message
 import com.deepassist.data.StreamResponse
@@ -56,7 +59,7 @@ class DeepSeekClient(private val apiKeyProvider: () -> String) {
 
     private val gson = Gson()
     private val jsonMediaType = "application/json".toMediaType()
-    private val client = OkHttpClient.Builder()
+    private val client = OkHttpClient.Builder().forApi("deepseek")
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
@@ -70,6 +73,8 @@ class DeepSeekClient(private val apiKeyProvider: () -> String) {
         }
 
         val request = buildRequest(apiKey, messages, tools, stream = true)
+
+        val requestStart = SystemClock.elapsedRealtime()
         val call = client.newCall(request)
         coroutineScope {
             // A blocking socket read ignores coroutine cancellation: cancel the HTTP call
@@ -99,6 +104,8 @@ class DeepSeekClient(private val apiKeyProvider: () -> String) {
                     }
 
                     val accumulating = sortedMapOf<Int, AccumulatingToolCall>()
+
+                    var firstDeltaLogged = false
                     var announcedFirstToolCall = false
                     val reasoning = StringBuilder()
 
@@ -115,6 +122,11 @@ class DeepSeekClient(private val apiKeyProvider: () -> String) {
                         } ?: continue
                         val choice = parsed.choices?.firstOrNull() ?: continue
                         val delta = choice.delta
+                        if (!firstDeltaLogged && (delta?.content != null || delta?.tool_calls != null)) {
+                            // The model's own time to its first answer token (reasoning included)
+                            firstDeltaLogged = true
+                            DiagLog.event("Net", "deepseek first answer token ${SystemClock.elapsedRealtime() - requestStart} ms")
+                        }
 
                         delta?.reasoning_content?.let { reasoning.append(it) }
 

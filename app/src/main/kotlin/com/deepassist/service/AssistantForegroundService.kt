@@ -412,12 +412,13 @@ class AssistantForegroundService : Service() {
                     sttOnDevice = true
                     metaDownUntil = SystemClock.elapsedRealtime() + FALLBACK_HOLD_MS
                     DiagLog.event("Speech", "STT fallback android")
-                    // The words said meanwhile are lost: the listening chime asks again
-                    if (result.heardSpeech) earcon(open = true)
+                    // Android's recognizer plays its own start sound: that asks for the words again
                 }
             }
         }
         if (!androidStt.isAvailable()) return null
+        // Google's recognizer chimes itself; ours on top made a double sound
+        listenEndPlayed = true
         return when (val result = androidStt.listen(partial) { speechEnded() }) {
             is SttResult.Final -> result.text
             else -> null
@@ -646,6 +647,7 @@ class AssistantForegroundService : Service() {
             // Lookups keep the waiting sound; tools that speak, guide or open an app don't
             waitingPaused = !tool.waitingTone
             toolInProgress = true
+            val toolStart = SystemClock.elapsedRealtime()
             results[callId] = try {
                 withTimeoutOrNull(tool.timeoutMs) { tool.execute(args) }
                     ?: ToolResult(false, "", error = "İşlem zaman aşımına uğradı.").also {
@@ -659,6 +661,8 @@ class AssistantForegroundService : Service() {
                 toolInProgress = false
                 waitingPaused = false
                 lastToolFinishedAt = SystemClock.elapsedRealtime()
+                val took = lastToolFinishedAt - toolStart
+                if (took >= 1_000L) DiagLog.event("Tool", "${fn.name} $took ms")
             }
             if (tool.successEarcon && results[callId]?.success == true) {
                 earcons.play(Earcons.Sound.SUCCESS)
@@ -945,7 +949,8 @@ class AssistantForegroundService : Service() {
         if (PermissionsHelper.hasOverlay(this)) OverlayService.showListening(this, text)
         VoiceActivity.set(VoiceActivity.Phase.LISTENING)
         Haptics.listenStart(this)
-        earcon(open = true)
+        // Android's recognizer (the fallback) plays its own start sound
+        if (metaUsable()) earcon(open = true)
     }
 
     private fun earcon(open: Boolean) {
@@ -1222,7 +1227,7 @@ class AssistantForegroundService : Service() {
         private const val MAX_CONVERSATION_TURNS = 50
         private const val ASK_USER_TIMEOUT_MS = 30_000L
         /** After a cloud STT/TTS failure, the next sessions start on Android's for this long. */
-        private const val FALLBACK_HOLD_MS = 5 * 60 * 1000L
+        private const val FALLBACK_HOLD_MS = 2 * 60 * 1000L
         private const val PREVIOUS_SESSION_JOIN_MS = 2_000L
         private const val WAIT_TONE_FIRST_MS = 700L
         private const val WAIT_TONE_INTERVAL_MS = 2_500L

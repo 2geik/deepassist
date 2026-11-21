@@ -1,5 +1,6 @@
 package com.deepassist.tools
 
+import com.deepassist.util.Net.forApi
 import android.content.Context
 import android.util.Log
 import com.deepassist.data.DuckDuckGoResponse
@@ -37,7 +38,7 @@ class WebSearchTool : Tool() {
     override val waitingTone = true
 
     private val gson = Gson()
-    private val client = OkHttpClient.Builder()
+    private val client = OkHttpClient.Builder().forApi("search")
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
         .build()

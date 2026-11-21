@@ -1,5 +1,6 @@
 package com.deepassist.speech
 
+import com.deepassist.util.Net.forApi
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -42,7 +43,7 @@ class RealtimeTts(private val apiKeyProvider: () -> String) {
     enum class Outcome { PLAYED, FAILED, STOPPED }
 
     private val gson = Gson()
-    private val client = OkHttpClient.Builder()
+    private val client = OkHttpClient.Builder().forApi("openai-tts")
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .pingInterval(20, TimeUnit.SECONDS)

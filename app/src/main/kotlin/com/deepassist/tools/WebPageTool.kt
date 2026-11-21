@@ -1,5 +1,6 @@
 package com.deepassist.tools
 
+import com.deepassist.util.Net.forApi
 import android.util.Log
 import com.deepassist.data.ToolProperty
 import com.deepassist.data.ToolResult
@@ -69,7 +70,7 @@ class WebPageTool : Tool() {
     override val waitingTone = true
 
     private val gson = Gson()
-    private val client = OkHttpClient.Builder()
+    private val client = OkHttpClient.Builder().forApi("webpage")
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .callTimeout(20, TimeUnit.SECONDS)
