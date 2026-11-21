@@ -25,6 +25,12 @@ abstract class Tool {
      */
     open val waitForSpeech: Boolean = false
 
+    /**
+     * Keeps the soft waiting sound going while this tool runs. Only for lookups that
+     * neither speak nor take over the screen or audio (web search, weather...).
+     */
+    open val waitingTone: Boolean = false
+
     /** Plays the "done" chime when [execute] succeeds — for actions, not questions. */
     open val successEarcon: Boolean = false
 

@@ -40,7 +40,7 @@ import com.deepassist.speech.Earcons
 import com.deepassist.speech.OpenAiTts
 import com.deepassist.speech.RealtimeStt
 import com.deepassist.speech.RealtimeSttResult
-import com.deepassist.speech.SpeechToText
+import com.deepassist.speech.DeepSeekAsr
 import com.deepassist.agent.ScreenAgent
 import com.deepassist.camera.LastPhoto
 import com.deepassist.tools.EndConversationTool
@@ -101,9 +101,9 @@ class AssistantForegroundService : Service() {
     private lateinit var androidTts: AndroidTts
     private lateinit var earcons: Earcons
 
-    // STT: realtime streaming session is the primary path, multipart is the fallback
+    // STT: OpenAI realtime streaming is the primary path, DeepSeek ASR the fallback
     private lateinit var realtimeStt: RealtimeStt
-    private lateinit var stt: SpeechToText
+    private lateinit var deepSeekAsr: DeepSeekAsr
 
     @Volatile private var currentSessionJob: Job? = null
     @Volatile private var currentChatId: String? = null
@@ -119,6 +119,8 @@ class AssistantForegroundService : Service() {
     @Volatile private var pendingListenJob: Job? = null
     @Volatile private var lastFgsType = -1
     @Volatile private var phraseJob: Job? = null
+    @Volatile private var waitingJob: Job? = null
+    @Volatile private var waitingPaused = false
     private var screenOffReceiver: BroadcastReceiver? = null
     @Volatile private var hadError = false
 
@@ -141,7 +143,7 @@ class AssistantForegroundService : Service() {
         androidTts = AndroidTts(this)
         earcons = Earcons(this)
         realtimeStt = RealtimeStt { secureStore.openAiApiKey }
-        stt = SpeechToText { secureStore.openAiApiKey }
+        deepSeekAsr = DeepSeekAsr { secureStore.deepseekApiKey }
         toolRegistry = ToolRegistry({ question -> askUser(question) }, deepSeek)
         Tool.playEarcon = { earcons.play(it) }
         Tool.say = { text -> awaitPhrase(); speak(text) }
@@ -282,8 +284,8 @@ class AssistantForegroundService : Service() {
 
                     if (text.isNullOrBlank()) {
                         if (turn == 1) {
-                            val hint = if (!secureStore.hasOpenAiKey()) {
-                                "Bu sürüm OpenAI anahtarı olmadan derlenmiş, seni duyamıyorum."
+                            val hint = if (!secureStore.hasOpenAiKey() && !secureStore.hasDeepSeekKey()) {
+                                "Bu sürüm OpenAI ve DeepSeek anahtarı olmadan derlenmiş, seni duyamıyorum."
                             } else if (!secureStore.hasDeepSeekKey()) {
                                 "Bu sürüm DeepSeek anahtarı olmadan derlenmiş, cevap veremiyorum."
                             } else {
@@ -383,20 +385,18 @@ class AssistantForegroundService : Service() {
             when (val result = realtimeStt.listen { partial -> overlayUserPartial(partial) }) {
                 is RealtimeSttResult.Final -> return result.text
                 is RealtimeSttResult.NoSpeech -> return null
-                is RealtimeSttResult.Unavailable -> Unit // fall back to multipart below
+                is RealtimeSttResult.Unavailable -> Unit // fall back to DeepSeek ASR below
             }
         }
 
         val audio = recordAudio() ?: return null
         updateNotification("Anlıyorum...")
         overlayStatus("Anlıyorum...")
-        val text = stt.transcribe(audio, "tr")
-        audio.delete()
-        return text
+        return transcribeFallback(audio)
     }
 
     /** STT for ask_user — primary path: realtime streaming websocket,
-     *  fallback: multipart to /v1/audio/transcriptions. */
+     *  fallback: DeepSeek ASR on a recording. */
     private suspend fun transcribeWithFallback(): String? {
         if (!PermissionsHelper.hasMicrophone(this)) return null
         if (secureStore.hasOpenAiKey()) {
@@ -407,9 +407,17 @@ class AssistantForegroundService : Service() {
             }
         }
         val audio = recordAudio() ?: return null
-        val text = stt.transcribe(audio, "tr")
-        audio.delete()
-        return text
+        return transcribeFallback(audio)
+    }
+
+    /** DeepSeek ASR on a recording; the file is deleted either way. */
+    private suspend fun transcribeFallback(audio: File): String? {
+        DiagLog.event("Speech", "STT fallback deepseek")
+        return try {
+            deepSeekAsr.transcribe(audio)
+        } finally {
+            audio.delete()
+        }
     }
 
     /** Records 16kHz mono PCM16; stops after 3s of silence or 8s total. Fallback only. */
@@ -519,6 +527,7 @@ class AssistantForegroundService : Service() {
     private suspend fun processUserPrompt(text: String): Boolean {
         processing.set(true)
         VoiceActivity.set(VoiceActivity.Phase.THINKING)
+        startWaitingTone()
         try {
             updateNotification("Düşünüyorum...")
             overlayStatus("Düşünüyorum...")
@@ -582,6 +591,7 @@ class AssistantForegroundService : Service() {
             handleError(e.message ?: "Bilinmeyen hata")
             return true
         } finally {
+            stopWaitingTone()
             processing.set(false)
         }
     }
@@ -696,6 +706,8 @@ class AssistantForegroundService : Service() {
             // announcement finish first so it isn't cut off by the dialer/SMS UI.
             if (tool.waitForSpeech) awaitPhrase()
 
+            // Lookups keep the waiting sound; tools that speak, guide or open an app don't
+            waitingPaused = !tool.waitingTone
             toolInProgress = true
             results[callId] = try {
                 withTimeoutOrNull(tool.timeoutMs) { tool.execute(args) }
@@ -708,6 +720,7 @@ class AssistantForegroundService : Service() {
                 ToolResult(false, "", error = e.message ?: "Araç çalıştırma hatası")
             } finally {
                 toolInProgress = false
+                waitingPaused = false
                 lastToolFinishedAt = SystemClock.elapsedRealtime()
             }
             if (tool.successEarcon && results[callId]?.success == true) {
@@ -723,6 +736,7 @@ class AssistantForegroundService : Service() {
     // ==================================================================
 
     private suspend fun askUser(question: String): String? {
+        stopWaitingTone()
         val clean = sanitizeForSpeech(question).ifBlank { question.trim() }
         if (PermissionsHelper.hasOverlay(this)) OverlayService.showMessage(this, clean)
         updateNotification(clean.take(120))
@@ -741,6 +755,11 @@ class AssistantForegroundService : Service() {
             }
         }
         pendingQuestion = null
+        // The request goes on (tool, model): waiting again until the answer is spoken
+        if (processing.get()) {
+            VoiceActivity.set(VoiceActivity.Phase.THINKING)
+            startWaitingTone()
+        }
         return answer
     }
 
@@ -803,6 +822,7 @@ class AssistantForegroundService : Service() {
     }
 
     private suspend fun showAndSpeak(text: String) {
+        stopWaitingTone()
         val clean = sanitizeForSpeech(text).ifBlank { text }
         overlayAssistant(clean)
         currentChatId?.let { id -> runCatching { chatHistory.append(id, "assistant", clean) } }
@@ -829,6 +849,7 @@ class AssistantForegroundService : Service() {
 
     /** @param farewell spoken goodbye; null when the reply was already spoken. */
     private suspend fun finishConversation(farewell: String?) {
+        stopWaitingTone()
         conversation.clear()
         if (farewell != null) {
             val clean = sanitizeForSpeech(farewell).ifBlank { "Görüşürüz!" }
@@ -853,6 +874,7 @@ class AssistantForegroundService : Service() {
     }
 
     private fun endCurrentSession() {
+        stopWaitingTone()
         abandonAudioFocus()
         currentSessionJob?.cancel()
         currentSessionJob = null
@@ -904,6 +926,7 @@ class AssistantForegroundService : Service() {
         .trim()
 
     private suspend fun handleError(message: String) {
+        stopWaitingTone()
         hadError = true
         earcons.play(Earcons.Sound.ERROR)
         Haptics.error(this)
@@ -977,6 +1000,31 @@ class AssistantForegroundService : Service() {
 
     private fun earcon(open: Boolean) {
         earcons.play(if (open) Earcons.Sound.LISTEN_START else Earcons.Sound.LISTEN_END)
+    }
+
+    /**
+     * A soft note every [WAIT_TONE_INTERVAL_MS] from the end of the request until the
+     * answer is spoken, so the user knows the assistant is still working. Silent while
+     * anything speaks (status phrase, tool speech) and while a tool other than a
+     * lookup runs ([Tool.waitingTone]).
+     */
+    private fun startWaitingTone() {
+        if (waitingJob?.isActive == true) return
+        waitingPaused = false
+        waitingJob = serviceScope.launch {
+            delay(WAIT_TONE_FIRST_MS) // after the "listening ended" chime
+            while (isActive) {
+                if (!waitingPaused && VoiceActivity.phase.value == VoiceActivity.Phase.THINKING) {
+                    earcons.play(Earcons.Sound.WAIT, WAIT_TONE_VOLUME)
+                }
+                delay(WAIT_TONE_INTERVAL_MS)
+            }
+        }
+    }
+
+    private fun stopWaitingTone() {
+        waitingJob?.cancel()
+        waitingJob = null
     }
 
     // ==================================================================
@@ -1216,6 +1264,9 @@ class AssistantForegroundService : Service() {
         private const val SILENCE_STOP_MS = 3_000L
         private const val SILENCE_THRESHOLD = 500
         private const val PREVIOUS_SESSION_JOIN_MS = 2_000L
+        private const val WAIT_TONE_FIRST_MS = 700L
+        private const val WAIT_TONE_INTERVAL_MS = 2_500L
+        private const val WAIT_TONE_VOLUME = 0.5f
         private const val SPEAK_BASE_MS = 8_000L
         private const val SPEAK_PER_CHAR_MS = 90L
         private const val SPEAK_MAX_MS = 300_000L

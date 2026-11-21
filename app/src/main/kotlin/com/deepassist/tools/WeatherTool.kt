@@ -39,6 +39,8 @@ class WeatherTool : Tool() {
     override val required = emptyList<String>()
     override val thinkingPhrase: String? = null
 
+    override val waitingTone = true
+
     override fun dynamicThinkingPhrase(args: JsonObject): String? {
         val city = args.optString("city")
         return if (city != null) {

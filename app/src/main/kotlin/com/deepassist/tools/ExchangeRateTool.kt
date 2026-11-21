@@ -35,6 +35,8 @@ class ExchangeRateTool : Tool() {
     override val required = listOf("base")
     override val thinkingPhrase: String? = "Kura bakıyorum..."
 
+    override val waitingTone = true
+
     companion object {
         private val cache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, JsonObject>>()
         private const val CACHE_TTL_MS = 10 * 60 * 1000L // 10 minutes

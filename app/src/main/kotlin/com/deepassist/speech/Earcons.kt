@@ -20,7 +20,8 @@ class Earcons(context: Context) {
         SUCCESS(R.raw.earcon_success),
         ERROR(R.raw.earcon_error),
         SHUTTER(R.raw.earcon_shutter),
-        TICK(R.raw.earcon_tick)
+        TICK(R.raw.earcon_tick),
+        WAIT(R.raw.earcon_wait)
     }
 
     private val pool = SoundPool.Builder()

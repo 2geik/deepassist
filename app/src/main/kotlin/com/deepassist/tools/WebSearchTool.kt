@@ -34,6 +34,8 @@ class WebSearchTool : Tool() {
     override val required = listOf("query")
     override val thinkingPhrase: String? = "Tabii, hemen araştırıyorum..."
 
+    override val waitingTone = true
+
     private val gson = Gson()
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)

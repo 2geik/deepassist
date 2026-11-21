@@ -30,6 +30,8 @@ class LocationTool : Tool() {
     override val required = emptyList<String>()
     override val thinkingPhrase: String? = "Konuma bakıyorum..."
 
+    override val waitingTone = true
+
     override suspend fun execute(args: JsonObject): ToolResult = withContext(Dispatchers.IO) {
         try {
             if (!PermissionsHelper.hasLocation(context)) {

@@ -101,6 +101,10 @@ def main():
     tone(b, 0.00, 1760, 0.07, gain=0.07)
     sounds["earcon_tick"] = (b, 0.22)
 
+    b = []  # waiting for the answer: one soft, round C5, repeated by the app
+    tone(b, 0.00, 523, 0.60, gain=0.12, partials=[(1.0, 1.0), (2.0, 0.12)], attack=0.03)
+    sounds["earcon_wait"] = (b, 0.28)
+
     for name, (buf, peak) in sounds.items():
         write(name, buf, peak)
         print(f"{name}.wav {len(buf) / RATE:.2f}s")

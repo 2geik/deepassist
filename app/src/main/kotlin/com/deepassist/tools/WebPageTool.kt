@@ -66,6 +66,8 @@ class WebPageTool : Tool() {
     override val required = listOf("results")
     override val thinkingPhrase: String? = "Ayrıntılarına bakıyorum..."
 
+    override val waitingTone = true
+
     private val gson = Gson()
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)

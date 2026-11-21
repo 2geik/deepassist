@@ -6,7 +6,7 @@ deepAssist is an experimental Android voice assistant I developed for people who
 
 ## What it does
 
-- Voice input through OpenAI realtime transcription, with a file transcription fallback; spoken replies through OpenAI or Android TTS.
+- Voice input through OpenAI realtime transcription, with DeepSeek ASR as the fallback; spoken replies through OpenAI TTS, with Android TTS as the fallback. A soft sound repeats while the answer is being prepared.
 - Tool based actions for calls, SMS, contacts, WhatsApp, notifications, media, YouTube, timers, device controls, location, weather, exchange rates, and web search.
 - **Camera ("gözüm ol"):** describes what is in front of the user, reads labels, bills and medicine boxes, counts Turkish lira. When reading a page it first guides the hand ("biraz sola çevir") with on-device text detection.
 - **Screen reading:** "ekranda ne yazıyor" reads the app on screen.
