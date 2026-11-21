@@ -43,6 +43,7 @@ import com.deepassist.tools.EndConversationTool
 import com.deepassist.tools.Tool
 import com.deepassist.tools.ToolRegistry
 import com.deepassist.util.DiagLog
+import com.deepassist.util.Net
 import com.deepassist.util.Haptics
 import com.deepassist.util.PermissionsHelper
 import java.util.Locale
@@ -120,6 +121,7 @@ class AssistantForegroundService : Service() {
     @Volatile private var pendingListenJob: Job? = null
     @Volatile private var lastFgsType = -1
     @Volatile private var phraseJob: Job? = null
+    @Volatile private var ttsCloseJob: Job? = null
     @Volatile private var waitingJob: Job? = null
     @Volatile private var waitingPaused = false
     private var screenOffReceiver: BroadcastReceiver? = null
@@ -133,6 +135,8 @@ class AssistantForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         DiagLog.event("Service", "onCreate")
+        // The phone's DNS can take 30 s: resolve the API hosts before they are needed
+        Net.prefetch(*Net.API_HOSTS)
         createNotificationChannel()
         secureStore = SecureStore(this)
         notifyStartupStatus()
@@ -249,7 +253,9 @@ class AssistantForegroundService : Service() {
                 currentChatId = resumeChatId
                 sttOnDevice = false
                 ttsOnDevice = false
+                Net.prefetch(*Net.API_HOSTS)
                 // Connecting the voice takes ~1.5 s; do it while the user talks
+                ttsCloseJob?.cancel()
                 if (cloudTtsUsable()) realtimeTts.warmUp()
                 val resumeRecord = resumeChatId?.let { chatHistory.load(it) }
                 val resumeTranscript = resumeRecord?.let { rec ->
@@ -370,7 +376,12 @@ class AssistantForegroundService : Service() {
                     VoiceActivity.set(VoiceActivity.Phase.IDLE)
                     LastPhoto.clear()
                     currentChatId = null
-                    realtimeTts.close()
+                    // Keep the voice session for a quick next request; close it when idle
+                    ttsCloseJob?.cancel()
+                    ttsCloseJob = serviceScope.launch {
+                        delay(TTS_IDLE_CLOSE_MS)
+                        realtimeTts.close()
+                    }
                     if (!hadError) updateNotification(computeStatusText())
                     hadError = false
                 }
@@ -1228,6 +1239,9 @@ class AssistantForegroundService : Service() {
         private const val ASK_USER_TIMEOUT_MS = 30_000L
         /** After a cloud STT/TTS failure, the next sessions start on Android's for this long. */
         private const val FALLBACK_HOLD_MS = 2 * 60 * 1000L
+
+        /** The realtime voice session stays open this long after a session ends. */
+        private const val TTS_IDLE_CLOSE_MS = 3 * 60 * 1000L
         private const val PREVIOUS_SESSION_JOIN_MS = 2_000L
         private const val WAIT_TONE_FIRST_MS = 700L
         private const val WAIT_TONE_INTERVAL_MS = 2_500L

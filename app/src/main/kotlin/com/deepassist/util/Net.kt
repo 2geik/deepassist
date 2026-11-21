@@ -1,11 +1,16 @@
 package com.deepassist.util
 
+import android.content.Context
+import android.content.SharedPreferences
 import android.os.SystemClock
 import java.io.IOException
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
+import java.net.UnknownHostException
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import okhttp3.Call
 import okhttp3.Dns
 import okhttp3.EventListener
@@ -22,19 +27,99 @@ import okhttp3.Protocol
  * pattern of an IPv6 route that stalls. Trying IPv4 addresses first avoids that;
  * IPv6 stays as the fallback.
  *
+ * DNS cache: the trace showed the real cause — on the phone's Wi-Fi a DNS lookup
+ * took 30 s (the router's resolver, fe80::1, doesn't answer), TCP 19 ms, TLS
+ * 44 ms. Answers are kept (also across restarts) and used at once; lookups run
+ * in the background ([prefetch] at service and session start, and whenever a
+ * cached answer is older than [REFRESH_AFTER_MS]). Only a host never resolved
+ * before waits for the system resolver.
+ *
  * Trace: one DiagLog line per call that opened a new connection or was slow —
  * host and phase durations only (DNS, TCP and family, TLS, response headers).
  */
 object Net {
 
-    private val ipv4First = object : Dns {
-        override fun lookup(hostname: String): List<InetAddress> =
-            Dns.SYSTEM.lookup(hostname).sortedBy { if (it is Inet4Address) 0 else 1 }
+    private class Entry(val addresses: List<InetAddress>, val resolvedAt: Long)
+
+    private val cache = ConcurrentHashMap<String, Entry>()
+    private val refreshing = ConcurrentHashMap.newKeySet<String>()
+    private val resolver = Executors.newFixedThreadPool(2) { r -> Thread(r, "dns-refresh").apply { isDaemon = true } }
+
+    @Volatile
+    private var prefs: SharedPreferences? = null
+
+    /** Loads the persisted answers; call once from Application.onCreate. */
+    fun init(context: Context) {
+        val p = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        prefs = p
+        for ((host, value) in p.all) {
+            val parts = (value as? String)?.split('|') ?: continue
+            val at = parts.getOrNull(1)?.toLongOrNull() ?: continue
+            // IP literals only: InetAddress.getByName doesn't query DNS for them
+            val addrs = parts[0].split(',').filter { it.isNotBlank() }
+                .mapNotNull { runCatching { InetAddress.getByName(it) }.getOrNull() }
+            if (addrs.isNotEmpty()) cache[host] = Entry(addrs, at)
+        }
+    }
+
+    /** Resolves [hosts] in the background so the next request doesn't wait for DNS. */
+    fun prefetch(vararg hosts: String) {
+        hosts.forEach { host ->
+            val e = cache[host]
+            if (e == null || age(e) > REFRESH_AFTER_MS) refreshAsync(host)
+        }
+    }
+
+    private fun age(e: Entry) = System.currentTimeMillis() - e.resolvedAt
+
+    private fun refreshAsync(host: String) {
+        if (!refreshing.add(host)) return
+        runCatching {
+            resolver.execute {
+                try {
+                    resolveNow(host)
+                } catch (e: Exception) {
+                    DiagLog.event("Net", "dns refresh $host failed ${e.javaClass.simpleName}")
+                } finally {
+                    refreshing.remove(host)
+                }
+            }
+        }.onFailure { refreshing.remove(host) }
+    }
+
+    private fun resolveNow(host: String): List<InetAddress> {
+        val start = SystemClock.elapsedRealtime()
+        val addrs = Dns.SYSTEM.lookup(host).sortedBy { if (it is Inet4Address) 0 else 1 }
+        val ms = SystemClock.elapsedRealtime() - start
+        if (ms >= SLOW_DNS_MS) DiagLog.event("Net", "dns $host $ms ms")
+        if (addrs.isNotEmpty()) {
+            val now = System.currentTimeMillis()
+            cache[host] = Entry(addrs, now)
+            prefs?.edit()?.putString(host, addrs.joinToString(",") { it.hostAddress.orEmpty() } + "|" + now)?.apply()
+        }
+        return addrs
+    }
+
+    /** Cached answers at once (refreshed in the background), IPv4 first. */
+    private val cachedDns = object : Dns {
+        override fun lookup(hostname: String): List<InetAddress> {
+            val e = cache[hostname]
+            if (e != null && age(e) < MAX_AGE_MS) {
+                if (age(e) > REFRESH_AFTER_MS) refreshAsync(hostname)
+                return e.addresses
+            }
+            return try {
+                resolveNow(hostname)
+            } catch (ex: UnknownHostException) {
+                // The resolver failed: an old answer is better than none
+                e?.addresses ?: throw ex
+            }
+        }
     }
 
     /** Applies IPv4-first DNS and the timing trace, labelled [name] in the log. */
     fun OkHttpClient.Builder.forApi(name: String): OkHttpClient.Builder =
-        dns(ipv4First).eventListenerFactory { Trace(name) }
+        dns(cachedDns).eventListenerFactory { Trace(name) }
 
     private class Trace(private val name: String) : EventListener() {
         private var start = 0L
@@ -117,4 +202,15 @@ object Net {
     }
 
     private const val SLOW_MS = 2_000L
+    private const val SLOW_DNS_MS = 1_000L
+    private const val PREFS = "dns_cache"
+
+    /** A cached answer older than this is refreshed in the background (still used meanwhile). */
+    private const val REFRESH_AFTER_MS = 5 * 60 * 1000L
+
+    /** Answers older than this are not used without a fresh lookup. */
+    private const val MAX_AGE_MS = 24 * 60 * 60 * 1000L
+
+    /** The hosts the assistant needs for every request. */
+    val API_HOSTS = arrayOf("api.deepseek.com", "api.meta.ai", "api.openai.com")
 }

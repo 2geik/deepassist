@@ -3,6 +3,7 @@ package com.deepassist
 import android.app.Application
 import android.os.SystemClock
 import com.deepassist.util.DiagLog
+import com.deepassist.util.Net
 
 class DeepAssistApp : Application() {
 
@@ -10,6 +11,7 @@ class DeepAssistApp : Application() {
         super.onCreate()
         processStartedAt = SystemClock.elapsedRealtime()
         DiagLog.init(this)
+        Net.init(this)
         DiagLog.event("App", "process start")
 
         // Record why the process died before the system's handler kills it
