@@ -45,10 +45,6 @@
             <action android:name="android.intent.action.VIEW" />
             <data android:scheme="https" />
         </intent>
-        <!-- Android speech recognizers, the fallback when OpenAI STT is unavailable -->
-        <intent>
-            <action android:name="android.speech.RecognitionService" />
-        </intent>
     </queries>
 
     <application

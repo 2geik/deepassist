@@ -35,16 +35,11 @@ import com.deepassist.llm.AccumulatingToolCall
 import com.deepassist.llm.DeepSeekClient
 import com.deepassist.llm.SystemPrompt
 import com.deepassist.llm.ToolParser
-import com.deepassist.speech.AndroidStt
 import com.deepassist.speech.AndroidTts
 import com.deepassist.speech.Earcons
-import com.deepassist.speech.OpenAiGate
 import com.deepassist.speech.OpenAiTts
 import com.deepassist.speech.RealtimeStt
 import com.deepassist.speech.RealtimeSttResult
-import com.deepassist.speech.SentenceSpeaker
-import com.deepassist.speech.SpeechLatency
-import com.deepassist.speech.SpeechText
 import com.deepassist.speech.SpeechToText
 import com.deepassist.agent.ScreenAgent
 import com.deepassist.camera.LastPhoto
@@ -79,12 +74,11 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * Central orchestrator — cascaded STT → DeepSeek LLM → TTS (cloud, Android fallback).
+ * Central orchestrator — cascaded STT → DeepSeek LLM → Android TTS.
  *
  * Flow (per turn):
- *   transcribe() → DeepSeek streamChat() → (tool calls? execute,
- *   feed results back, repeat) → speak the answer sentence by sentence while it
- *   streams → reopen mic for
+ *   listenAndTranscribe() → DeepSeek streamChat() → (tool calls? execute,
+ *   feed results back, repeat) → speak the final answer → reopen mic for
  *   a follow-up command.
  */
 class AssistantForegroundService : Service() {
@@ -107,9 +101,8 @@ class AssistantForegroundService : Service() {
     private lateinit var androidTts: AndroidTts
     private lateinit var earcons: Earcons
 
-    // STT: OpenAI realtime first, then Android's recognizer, multipart OpenAI last
+    // STT: realtime streaming session is the primary path, multipart is the fallback
     private lateinit var realtimeStt: RealtimeStt
-    private lateinit var androidStt: AndroidStt
     private lateinit var stt: SpeechToText
 
     @Volatile private var currentSessionJob: Job? = null
@@ -126,7 +119,6 @@ class AssistantForegroundService : Service() {
     @Volatile private var pendingListenJob: Job? = null
     @Volatile private var lastFgsType = -1
     @Volatile private var phraseJob: Job? = null
-    private val speakers = java.util.concurrent.ConcurrentHashMap.newKeySet<SentenceSpeaker>()
     private var screenOffReceiver: BroadcastReceiver? = null
     @Volatile private var hadError = false
 
@@ -134,11 +126,6 @@ class AssistantForegroundService : Service() {
     private val sessionGeneration = AtomicInteger(0)
 
     override fun onBind(intent: Intent?): IBinder? = null
-
-    /** The OpenAI key for speech; debug builds can swap in a rejected one to test the fallback. */
-    private fun openAiKey(): String =
-        if (BuildConfig.DEBUG && debugSttMode == STT_MODE_INVALID_KEY) "sk-invalid-debug-key"
-        else secureStore.openAiApiKey
 
     override fun onCreate() {
         super.onCreate()
@@ -150,12 +137,11 @@ class AssistantForegroundService : Service() {
         conversation = ConversationManager()
         deepSeek = DeepSeekClient { secureStore.deepseekApiKey }
         memoryExtractor = MemoryExtractor(this, deepSeek)
-        openAiTts = OpenAiTts { openAiKey() }
+        openAiTts = OpenAiTts { secureStore.openAiApiKey }
         androidTts = AndroidTts(this)
         earcons = Earcons(this)
-        realtimeStt = RealtimeStt { openAiKey() }
-        androidStt = AndroidStt(this)
-        stt = SpeechToText { openAiKey() }
+        realtimeStt = RealtimeStt { secureStore.openAiApiKey }
+        stt = SpeechToText { secureStore.openAiApiKey }
         toolRegistry = ToolRegistry({ question -> askUser(question) }, deepSeek)
         Tool.playEarcon = { earcons.play(it) }
         Tool.say = { text -> awaitPhrase(); speak(text) }
@@ -291,12 +277,12 @@ class AssistantForegroundService : Service() {
                         debugPrompt
                     } else {
                         startListeningFeedback("Dinliyorum...")
-                        transcribe { partial -> overlayUserPartial(partial) }.also { earcon(open = false) }
+                        listenAndTranscribe().also { earcon(open = false) }
                     }
 
                     if (text.isNullOrBlank()) {
                         if (turn == 1) {
-                            val hint = if (!secureStore.hasOpenAiKey() && !androidStt.isAvailable()) {
+                            val hint = if (!secureStore.hasOpenAiKey()) {
                                 "Bu sürüm OpenAI anahtarı olmadan derlenmiş, seni duyamıyorum."
                             } else if (!secureStore.hasDeepSeekKey()) {
                                 "Bu sürüm DeepSeek anahtarı olmadan derlenmiş, cevap veremiyorum."
@@ -313,7 +299,6 @@ class AssistantForegroundService : Service() {
                         break
                     }
 
-                    SpeechLatency.userDone()
                     overlayUser(text)
                     val chatId = currentChatId ?: chatHistory.create(text).id
                     currentChatId = chatId
@@ -389,57 +374,39 @@ class AssistantForegroundService : Service() {
     // STT
     // ==================================================================
 
-    /**
-     * The one STT chain, for requests and for ask_user answers:
-     *  1. OpenAI realtime (audio streams while the user talks, transcript types live);
-     *  2. Android's SpeechRecognizer when realtime is unavailable — and directly,
-     *     without trying OpenAI, while [OpenAiGate] is open after a quota/auth error;
-     *  3. multipart OpenAI as the last resort when the phone has no recognizer.
-     *
-     * @param onPartial live transcript for the panel; null for ask_user answers.
-     */
-    private suspend fun transcribe(onPartial: ((String) -> Unit)?): String? {
+    private suspend fun listenAndTranscribe(): String? {
         if (!PermissionsHelper.hasMicrophone(this)) return null
-        val partial: (String) -> Unit = { text -> onPartial?.invoke(text) }
 
-        val forceAndroid = BuildConfig.DEBUG && debugSttMode == STT_MODE_ANDROID
-        var fallbackReason = when {
-            forceAndroid -> "forced"
-            !secureStore.hasOpenAiKey() -> "no key"
-            OpenAiGate.isBlocked() -> "breaker open"
-            else -> null
-        }
-        if (fallbackReason == null) {
-            when (val result = realtimeStt.listen(partial)) {
+        // Primary path: realtime streaming STT — audio uploads while the user
+        // is still talking and the transcript types into the overlay live
+        if (secureStore.hasOpenAiKey()) {
+            when (val result = realtimeStt.listen { partial -> overlayUserPartial(partial) }) {
                 is RealtimeSttResult.Final -> return result.text
                 is RealtimeSttResult.NoSpeech -> return null
-                is RealtimeSttResult.Unavailable -> {
-                    OpenAiGate.report("stt", result.reason)
-                    fallbackReason = result.reason.name.lowercase(Locale.ROOT)
-                    // It failed while connecting: the user hasn't spoken yet and the
-                    // recognizer below just keeps listening. Mid-sentence, the words are
-                    // lost — the listening chime asks for them again.
-                    if (result.heardSpeech) earcon(open = true)
-                }
+                is RealtimeSttResult.Unavailable -> Unit // fall back to multipart below
             }
         }
 
-        if (androidStt.isAvailable()) {
-            DiagLog.event("Speech", "STT fallback android ($fallbackReason)")
-            when (val result = androidStt.listen(partial)) {
-                is RealtimeSttResult.Final -> return result.text
-                is RealtimeSttResult.NoSpeech -> return null
-                is RealtimeSttResult.Unavailable -> Unit // last resort below
-            }
-        }
-        if (forceAndroid || !secureStore.hasOpenAiKey() || OpenAiGate.isBlocked()) return null
-
-        DiagLog.event("Speech", "STT fallback multipart")
         val audio = recordAudio() ?: return null
-        if (onPartial != null) {
-            updateNotification("Anlıyorum...")
-            overlayStatus("Anlıyorum...")
+        updateNotification("Anlıyorum...")
+        overlayStatus("Anlıyorum...")
+        val text = stt.transcribe(audio, "tr")
+        audio.delete()
+        return text
+    }
+
+    /** STT for ask_user — primary path: realtime streaming websocket,
+     *  fallback: multipart to /v1/audio/transcriptions. */
+    private suspend fun transcribeWithFallback(): String? {
+        if (!PermissionsHelper.hasMicrophone(this)) return null
+        if (secureStore.hasOpenAiKey()) {
+            when (val result = realtimeStt.listen { /* no partial — question asked */ }) {
+                is RealtimeSttResult.Final -> return result.text
+                is RealtimeSttResult.NoSpeech -> return null
+                is RealtimeSttResult.Unavailable -> Unit // fall through
+            }
         }
+        val audio = recordAudio() ?: return null
         val text = stt.transcribe(audio, "tr")
         audio.delete()
         return text
@@ -557,19 +524,56 @@ class AssistantForegroundService : Service() {
             overlayStatus("Düşünüyorum...")
             conversation.addUserMessage(text)
 
-            val turn = streamTurn(announceTools = true)
-            turn.error?.let { error ->
+            var streamError: String? = null
+            var completedToolCalls: List<AccumulatingToolCall>? = null
+            var toolReasoning: String? = null
+            var spokeThinking = false
+            val content = StringBuilder()
+
+            deepSeek.streamChat(conversation.getMessages(), toolRegistry.getDefinitions())
+                .collect { event ->
+                    when {
+                        event.error != null -> streamError = event.error
+
+                        event.finishReason == "tool_calls" -> {
+                            completedToolCalls = event.toolCalls
+                            toolReasoning = event.reasoning
+                        }
+
+                        event.finishReason == "stop" -> Unit
+
+                        // Early tool-call signal: speak the thinking phrase immediately,
+                        // before the tool arguments finish streaming
+                        event.toolCalls != null -> {
+                            if (!spokeThinking) {
+                                val toolName = event.toolCalls.firstOrNull()?.name
+                                val phrase = toolName?.let { toolRegistry.get(it)?.thinkingPhrase }
+                                if (!phrase.isNullOrBlank()) {
+                                    spokeThinking = true
+                                    updateNotification(phrase)
+                                    overlayStatus(phrase)
+                                    speakAsync(phrase)
+                                }
+                            }
+                        }
+
+                        event.contentDelta != null -> content.append(event.contentDelta)
+                    }
+                }
+
+            val error = streamError
+            if (error != null) {
                 handleError(error)
                 return true
             }
-            return if (!turn.toolCalls.isNullOrEmpty()) {
-                runAgentLoop(
-                    turn.toolCalls.map { it.toToolCall() },
-                    turn.spokeThinking || turn.spokeLeadIn,
-                    turn.reasoning
-                )
+
+            val toolCalls = completedToolCalls
+            return if (!toolCalls.isNullOrEmpty()) {
+                runAgentLoop(toolCalls.map { it.toToolCall() }, spokeThinking, toolReasoning)
             } else {
-                finishSpokenAnswer(turn, fallback = "Bir cevap üretemedim.")
+                val answer = content.toString().trim().ifBlank { "Bir cevap üretemedim." }
+                conversation.addAssistantMessage(answer)
+                showAndSpeak(answer)
                 false
             }
         } catch (e: CancellationException) {
@@ -584,10 +588,8 @@ class AssistantForegroundService : Service() {
 
     /**
      * Executes tool calls and feeds results back to DeepSeek. The follow-up
-     * request may ask for further tools (e.g. search_contacts → make_phone_call),
-     * so this loops until a text answer arrives or MAX_TOOL_ROUNDS is hit. The
-     * follow-ups stream too: long answers after search_web are spoken sentence by
-     * sentence while they are still being written.
+     * completion may request further tools (e.g. search_contacts → make_phone_call),
+     * so this loops until a text answer arrives or MAX_TOOL_ROUNDS is hit.
      *
      * @return true when the conversation ended (end_conversation or error).
      */
@@ -627,162 +629,25 @@ class AssistantForegroundService : Service() {
 
             updateNotification("Cevap hazırlanıyor...")
             overlayStatus("Cevap hazırlanıyor...")
-            val turn = streamTurn(announceTools = false)
-            turn.error?.let { error ->
-                handleError(error)
+            val reply = deepSeek.complete(conversation.getMessages(), toolRegistry.getDefinitions())
+            if (reply == null) {
+                handleError("DeepSeek'ten cevap alınamadı.")
                 return true
             }
 
-            val nextCalls = turn.toolCalls
+            val nextCalls = reply.tool_calls
             if (nextCalls.isNullOrEmpty()) {
-                finishSpokenAnswer(turn, fallback = "İşlem tamamlandı.")
+                val answer = reply.content?.trim().takeUnless { it.isNullOrBlank() } ?: "İşlem tamamlandı."
+                conversation.addAssistantMessage(answer)
+                showAndSpeak(answer)
                 return false
             }
-            toolCalls = nextCalls.map { it.toToolCall() }
-            reasoning = turn.reasoning
-            // Each round announces its own first tool, unless a spoken lead-in already did
-            phraseSpoken = turn.spokeLeadIn
+            toolCalls = nextCalls
+            reasoning = reply.reasoning_content
+            phraseSpoken = false // each round announces its own first tool
         }
         handleError("İşlem çok fazla adım gerektirdi ve yarıda kesildi.")
         return true
-    }
-
-    /** What one streamed model turn produced. */
-    private class StreamedTurn(
-        val content: String,
-        val toolCalls: List<AccumulatingToolCall>?,
-        /** reasoning_content of a tool-call turn; it must go back with the tool-call message. */
-        val reasoning: String?,
-        val error: String?,
-        /** Speaks the text answer; already finished when the turn has no tool calls. */
-        val speaker: SentenceSpeaker,
-        /** Text written before the tool call was (being) spoken — no thinking phrase on top. */
-        val spokeLeadIn: Boolean,
-        /** The thinking phrase was spoken on the early tool-call signal. */
-        val spokeThinking: Boolean
-    )
-
-    /**
-     * Streams one DeepSeek turn and speaks its text while it is written.
-     *
-     * DeepSeek sometimes writes a little text and then calls a tool. So:
-     *  - nothing is spoken before the first complete sentence (the splitter's rule);
-     *  - when a tool call starts, every sentence not yet taken for speaking is dropped;
-     *  - if a sentence was already taken, it is finished, and the tool round's
-     *    thinking phrase is skipped: the lead-in ("Hemen bakıyorum.") already says it.
-     *  - otherwise the thinking phrase is spoken as before ([announceTools], first turn).
-     */
-    private suspend fun streamTurn(announceTools: Boolean): StreamedTurn {
-        val content = StringBuilder()
-        var shown = ""
-        val speaker = newSpeaker(
-            answer = true,
-            onSentence = { sentence ->
-                shown = if (shown.isEmpty()) sentence else "$shown $sentence"
-                if (PermissionsHelper.hasOverlay(this)) OverlayService.showMessageProgress(this, shown)
-            }
-        )
-        var error: String? = null
-        var completedCalls: List<AccumulatingToolCall>? = null
-        var reasoning: String? = null
-        var toolSeen = false
-        var spokeLeadIn = false
-        var spokeThinking = false
-
-        fun onToolCall(name: String?) {
-            if (toolSeen) return
-            toolSeen = true
-            spokeLeadIn = speaker.cutAfterCurrent()
-            if (spokeLeadIn) {
-                // The lead-in keeps playing; later steps wait for it like for a phrase
-                val previous = phraseJob
-                phraseJob = serviceScope.launch {
-                    previous?.join()
-                    speaker.await()
-                }
-                OverlayService.closeMessageProgress()
-                return
-            }
-            speaker.stop()
-            if (!announceTools) return
-            val phrase = name?.let { toolRegistry.get(it)?.thinkingPhrase }
-            if (!phrase.isNullOrBlank()) {
-                spokeThinking = true
-                updateNotification(phrase)
-                overlayStatus(phrase)
-                speakAsync(phrase)
-            }
-        }
-
-        try {
-            deepSeek.streamChat(conversation.getMessages(), toolRegistry.getDefinitions())
-                .collect { event ->
-                    when {
-                        event.error != null -> error = event.error
-
-                        event.finishReason == "tool_calls" -> {
-                            completedCalls = event.toolCalls
-                            reasoning = event.reasoning
-                            onToolCall(event.toolCalls?.firstOrNull()?.name)
-                        }
-
-                        event.finishReason == "stop" -> Unit
-
-                        // Early tool-call signal, before the arguments finish streaming
-                        event.toolCalls != null -> onToolCall(event.toolCalls.firstOrNull()?.name)
-
-                        event.contentDelta != null -> {
-                            content.append(event.contentDelta)
-                            if (!toolSeen) speaker.append(event.contentDelta)
-                        }
-                    }
-                }
-        } catch (e: Exception) {
-            speaker.stop() // CancellationException included: nothing keeps talking
-            throw e
-        }
-
-        if (error != null) {
-            speaker.stop()
-            OverlayService.closeMessageProgress()
-        } else if (!toolSeen) {
-            speaker.finish()
-        }
-        return StreamedTurn(
-            content = content.toString(),
-            toolCalls = completedCalls,
-            reasoning = reasoning,
-            error = error,
-            speaker = speaker,
-            spokeLeadIn = spokeLeadIn,
-            spokeThinking = spokeThinking
-        )
-    }
-
-    /**
-     * A streamed text answer: recorded once with its full text, then the rest is
-     * spoken, then the panel shows the final text in place of the growing one.
-     */
-    private suspend fun finishSpokenAnswer(turn: StreamedTurn, fallback: String) {
-        val answer = turn.content.trim()
-        if (answer.isEmpty()) {
-            turn.speaker.stop()
-            conversation.addAssistantMessage(fallback)
-            showAndSpeak(fallback)
-            return
-        }
-        conversation.addAssistantMessage(answer)
-        val clean = SpeechText.sanitize(answer).ifBlank { answer }
-        currentChatId?.let { id -> runCatching { chatHistory.append(id, "assistant", clean) } }
-        DiagLog.event("Latency", "answer complete, ${answer.length} chars")
-        try {
-            turn.speaker.await()
-        } finally {
-            if (VoiceActivity.phase.value == VoiceActivity.Phase.SPEAKING) {
-                VoiceActivity.set(if (processing.get()) VoiceActivity.Phase.THINKING else VoiceActivity.Phase.IDLE)
-            }
-        }
-        overlayAssistant(clean)
     }
 
     /**
@@ -858,7 +723,7 @@ class AssistantForegroundService : Service() {
     // ==================================================================
 
     private suspend fun askUser(question: String): String? {
-        val clean = SpeechText.sanitize(question).ifBlank { question.trim() }
+        val clean = sanitizeForSpeech(question).ifBlank { question.trim() }
         if (PermissionsHelper.hasOverlay(this)) OverlayService.showMessage(this, clean)
         updateNotification(clean.take(120))
         awaitPhrase() // don't talk over a still-playing status phrase
@@ -883,7 +748,7 @@ class AssistantForegroundService : Service() {
         if (!listening.compareAndSet(false, true)) return
         try {
             startListeningFeedback("Cevabını dinliyorum...")
-            val text = transcribe(onPartial = null)
+            val text = transcribeWithFallback()
             earcon(open = false)
             if (!text.isNullOrBlank()) overlayUser(text)
             val cont = pendingQuestion
@@ -900,70 +765,31 @@ class AssistantForegroundService : Service() {
     // Speech
     // ==================================================================
 
-    /** Speaks [text] to the end (or until the watchdog / [stopSpeech]). */
     private suspend fun speak(text: String) {
         if (!secureStore.voiceResponseEnabled || text.isBlank()) return
         val budgetMs = (SPEAK_BASE_MS + text.length * SPEAK_PER_CHAR_MS).coerceAtMost(SPEAK_MAX_MS)
         VoiceActivity.set(VoiceActivity.Phase.SPEAKING)
         coroutineScope {
-            val speaker = newSpeaker()
+            val timedOut = AtomicBoolean(false)
             // A TTS engine can silently drop an utterance or stall on the network;
             // stopping playback unblocks both engines so the session moves on.
             val watchdog = launch {
                 delay(budgetMs)
+                timedOut.set(true)
                 Log.w(TAG, "speak watchdog fired after ${budgetMs}ms")
-                speaker.stop()
+                runCatching { openAiTts.stop() }
                 runCatching { androidTts.stop() }
             }
             try {
-                speaker.append(text)
-                speaker.finish()
-                speaker.await()
+                val played = secureStore.hasOpenAiKey() && openAiTts.speak(text)
+                if (!played && !timedOut.get()) androidTts.speak(text)
             } finally {
                 watchdog.cancel()
-                speaker.stop()
                 if (VoiceActivity.phase.value == VoiceActivity.Phase.SPEAKING) {
                     VoiceActivity.set(if (processing.get()) VoiceActivity.Phase.THINKING else VoiceActivity.Phase.IDLE)
                 }
             }
         }
-    }
-
-    /**
-     * A speaker for one utterance or one streamed answer, registered so that
-     * [stopSpeech] (session end, audio focus loss, new trigger) cuts it off.
-     * An answer waits for a status phrase still playing before its first sentence.
-     */
-    private fun newSpeaker(answer: Boolean = false, onSentence: (String) -> Unit = {}): SentenceSpeaker {
-        val speaker = SentenceSpeaker(
-            cloud = if (secureStore.hasOpenAiKey()) openAiTts else null,
-            androidTts = androidTts,
-            scope = serviceScope,
-            budgetMs = { sentence ->
-                (SPEAK_BASE_MS + sentence.length * SPEAK_PER_CHAR_MS).coerceAtMost(SPEAK_MAX_MS)
-            },
-            silent = !secureStore.voiceResponseEnabled,
-            beforeFirstSound = { if (answer) awaitPhrase() },
-            onSentence = onSentence,
-            onFirstSound = {
-                VoiceActivity.set(VoiceActivity.Phase.SPEAKING)
-                if (answer) SpeechLatency.armAnswer()
-                SpeechLatency.audioStarted()
-            }
-        )
-        speakers += speaker
-        serviceScope.launch {
-            speaker.await()
-            speakers -= speaker
-        }
-        return speaker
-    }
-
-    /** Stops every voice at once: streamed answers, phrases, both engines. */
-    private fun stopSpeech() {
-        speakers.toList().forEach { runCatching { it.stop() } }
-        runCatching { openAiTts.stop() }
-        runCatching { androidTts.stop() }
     }
 
     private fun speakAsync(text: String) {
@@ -977,11 +803,10 @@ class AssistantForegroundService : Service() {
     }
 
     private suspend fun showAndSpeak(text: String) {
-        val clean = SpeechText.sanitize(text).ifBlank { text }
+        val clean = sanitizeForSpeech(text).ifBlank { text }
         overlayAssistant(clean)
         currentChatId?.let { id -> runCatching { chatHistory.append(id, "assistant", clean) } }
         awaitPhrase()
-        SpeechLatency.armAnswer(clean.length)
         speak(clean)
     }
 
@@ -1006,7 +831,7 @@ class AssistantForegroundService : Service() {
     private suspend fun finishConversation(farewell: String?) {
         conversation.clear()
         if (farewell != null) {
-            val clean = SpeechText.sanitize(farewell).ifBlank { "Görüşürüz!" }
+            val clean = sanitizeForSpeech(farewell).ifBlank { "Görüşürüz!" }
             overlayAssistant(clean)
             currentChatId?.let { id ->
                 runCatching { chatHistory.append(id, "assistant", clean) }
@@ -1038,7 +863,8 @@ class AssistantForegroundService : Service() {
         // The answer listener runs outside the session job; it must not keep the mic
         pendingListenJob?.cancel()
         pendingListenJob = null
-        stopSpeech()
+        runCatching { openAiTts.stop() }
+        runCatching { androidTts.stop() }
         listening.set(false)
         processing.set(false)
         sessionActive = false
@@ -1070,6 +896,13 @@ class AssistantForegroundService : Service() {
         if (PermissionsHelper.hasOverlay(this)) OverlayService.showStatus(this, text)
     }
 
+    private fun sanitizeForSpeech(text: String): String = text
+        .replace(Regex("```[\\s\\S]*?```"), " ")
+        .replace(Regex("\\[([^\\]]*)]\\([^)]*\\)"), "$1")
+        .replace(Regex("[*_~`#>]+"), "")
+        .replace(Regex("[ \\t]+"), " ")
+        .trim()
+
     private suspend fun handleError(message: String) {
         hadError = true
         earcons.play(Earcons.Sound.ERROR)
@@ -1100,7 +933,8 @@ class AssistantForegroundService : Service() {
                     }
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                         // Temporary loss (notification sound, navigation prompt)
-                        stopSpeech()
+                        runCatching { openAiTts.stop() }
+                        runCatching { androidTts.stop() }
                     }
                     else -> Unit
                 }
@@ -1311,7 +1145,8 @@ class AssistantForegroundService : Service() {
         screenOffReceiver = null
         pendingQuestion?.let { if (it.isActive) it.cancel() }
         pendingQuestion = null
-        stopSpeech()
+        runCatching { openAiTts.stop() }
+        runCatching { androidTts.stop() }
         runCatching { androidTts.shutdown() }
         earcons.release()
         serviceScope.cancel()
@@ -1330,17 +1165,6 @@ class AssistantForegroundService : Service() {
         const val ACTION_DEBUG_PROMPT = "com.deepassist.DEBUG_PROMPT"
         const val EXTRA_DEBUG_TEXT = "text"
         const val EXTRA_RESUME_CHAT_ID = "resume_chat_id"
-
-        const val STT_MODE_AUTO = "auto"
-        const val STT_MODE_ANDROID = "android"
-        const val STT_MODE_INVALID_KEY = "invalid_key"
-
-        /**
-         * Debug builds: "android" skips OpenAI STT so the fallback can be tested while
-         * OpenAI works; "invalid_key" sends a rejected key to OpenAI STT and TTS.
-         */
-        @Volatile
-        var debugSttMode = STT_MODE_AUTO
 
         private const val TAG = "AssistantFgs"
 

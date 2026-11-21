@@ -1,6 +1,5 @@
 package com.deepassist.tools
 
-import com.deepassist.speech.TurkishClock
 import com.deepassist.data.ToolProperty
 import com.deepassist.data.ToolResult
 import com.deepassist.util.DeviceUtils
@@ -19,7 +18,7 @@ class DeviceInfoTool : Tool() {
         val charging = if (state.isCharging) ", şarj oluyor" else ""
         return ToolResult(
             true,
-            "Saat: ${state.currentTime} (okunuşu: ${TurkishClock.spoken(state.currentTime)}), Tarih: ${state.currentDate} (${state.dayOfWeek}), " +
+            "Saat: ${state.currentTime}, Tarih: ${state.currentDate} (${state.dayOfWeek}), " +
                 "Batarya: %${state.batteryLevel}$charging, Ağ: ${state.networkType}"
         )
     }

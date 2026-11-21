@@ -1,9 +1,15 @@
 package com.deepassist.speech
 
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioTrack
+import android.media.PlaybackParams
 import com.google.gson.Gson
-import java.io.InputStream
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -11,14 +17,13 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
 /**
- * OpenAI TTS (tts-1 / nova) behind [CloudTts]. Requests raw 24 kHz mono PCM so
- * playback can start on the first chunk. tts-1 has no speaking-style
- * instructions; the 1.1x pace is set by the player.
- *
- * tts-1 is retired on 6 January 2027 — the replacement provider is one new
- * [CloudTts] class.
+ * OpenAI TTS client (tts-1 / nova). Requests raw 24kHz mono PCM and
+ * streams it straight into an AudioTrack as it downloads, so speech starts on
+ * the first chunk instead of after the whole file is synthesized. Playback is
+ * sped up 1.1x via [PlaybackParams]; tts-1 has no speaking-style instructions,
+ * so pacing is set on the device.
  */
-class OpenAiTts(private val apiKeyProvider: () -> String) : CloudTts {
+class OpenAiTts(private val apiKeyProvider: () -> String) {
 
     private val gson = Gson()
     private val client = OkHttpClient.Builder()
@@ -27,19 +32,23 @@ class OpenAiTts(private val apiKeyProvider: () -> String) : CloudTts {
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    private val calls = ConcurrentHashMap.newKeySet<Call>()
+    @Volatile
+    private var currentTrack: AudioTrack? = null
 
-    override fun synthesize(text: String): CloudTts.Synthesis = object : CloudTts.Synthesis {
-        @Volatile
-        private var call: Call? = null
+    @Volatile
+    private var currentCall: Call? = null
 
-        @Volatile
-        private var cancelled = false
+    /**
+     * Synthesizes and plays [text]; returns when playback finishes.
+     * Returns false only if nothing was played — caller falls back to Android TTS.
+     */
+    suspend fun speak(text: String): Boolean = withContext(Dispatchers.IO) {
+        val apiKey = apiKeyProvider()
+        if (apiKey.isBlank() || text.isBlank()) return@withContext false
 
-        override fun open(): InputStream? {
-            val apiKey = apiKeyProvider()
-            // After a quota/auth error the on-device voice speaks for the cooldown
-            if (apiKey.isBlank() || text.isBlank() || OpenAiGate.isBlocked() || cancelled) return null
+        var track: AudioTrack? = null
+        var playedAnything = false
+        try {
             val payload = mapOf(
                 "model" to "tts-1",
                 "input" to text.take(4000),
@@ -51,43 +60,93 @@ class OpenAiTts(private val apiKeyProvider: () -> String) : CloudTts {
                 .addHeader("Authorization", "Bearer $apiKey")
                 .post(gson.toJson(payload).toRequestBody("application/json".toMediaType()))
                 .build()
-            val c = client.newCall(request)
-            call = c
-            calls.add(c)
-            if (cancelled) c.cancel()
-            return try {
-                val resp = c.execute()
-                if (!resp.isSuccessful) {
-                    OpenAiGate.fromHttpCode(resp.code)?.let { OpenAiGate.report("tts", it) }
-                    resp.close()
-                    calls.remove(c)
-                    return null
-                }
-                val body = resp.body ?: run {
-                    resp.close()
-                    calls.remove(c)
-                    return null
-                }
-                object : java.io.FilterInputStream(body.byteStream()) {
-                    override fun close() {
-                        calls.remove(c)
-                        runCatching { resp.close() }
-                    }
-                }
-            } catch (e: Exception) {
-                calls.remove(c)
-                null
-            }
-        }
+            val call = client.newCall(request)
+            currentCall = call
 
-        override fun cancel() {
-            cancelled = true
-            call?.let { runCatching { it.cancel() } }
+            call.execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext false
+                val source = resp.body?.byteStream() ?: return@withContext false
+
+                val minBuf = AudioTrack.getMinBufferSize(
+                    SAMPLE_RATE,
+                    AudioFormat.CHANNEL_OUT_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT
+                )
+                val bufferBytes = maxOf(minBuf * 2, 16384)
+                val newTrack = AudioTrack(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build(),
+                    AudioFormat.Builder()
+                        .setSampleRate(SAMPLE_RATE)
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .build(),
+                    bufferBytes,
+                    AudioTrack.MODE_STREAM,
+                    AudioManager.AUDIO_SESSION_ID_GENERATE
+                )
+                runCatching {
+                    newTrack.playbackParams = PlaybackParams().setSpeed(PLAYBACK_SPEED)
+                }
+                currentTrack?.let { runCatching { it.release() } }
+                currentTrack = newTrack
+                track = newTrack
+                newTrack.play()
+
+                // PCM16 frames are 2 bytes; carry any odd tail byte to the next chunk
+                val buf = ByteArray(8192)
+                var pending = 0
+                loop@ while (true) {
+                    val read = source.read(buf, pending, buf.size - pending)
+                    if (read == -1) break
+                    val total = pending + read
+                    val writable = total and 0x7FFFFFFE
+                    var written = 0
+                    while (written < writable) {
+                        val n = newTrack.write(buf, written, writable - written)
+                        if (n <= 0) break@loop // track released by stop()
+                        written += n
+                        playedAnything = true
+                    }
+                    pending = total - writable
+                    if (pending > 0) buf[0] = buf[writable]
+                }
+
+                // Blocking writes mean at most one buffer remains; let it drain
+                runCatching { newTrack.stop() }
+                Thread.sleep(minOf(500L, bufferBytes * 1000L / (SAMPLE_RATE * 2)))
+            }
+            playedAnything
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Mid-playback failure: report success so the caller doesn't repeat
+            // the whole sentence over Android TTS
+            playedAnything
+        } finally {
+            if (currentCall?.isCanceled() != true) currentCall = null
+            track?.let {
+                runCatching { it.release() }
+                if (currentTrack === it) currentTrack = null
+            }
         }
     }
 
-    override fun stop() {
-        calls.toList().forEach { runCatching { it.cancel() } }
-        calls.clear()
+    fun stop() {
+        runCatching { currentCall?.cancel() }
+        currentCall = null
+        currentTrack?.let {
+            runCatching { it.pause() }
+            runCatching { it.flush() }
+            runCatching { it.release() }
+        }
+        currentTrack = null
+    }
+
+    companion object {
+        private const val SAMPLE_RATE = 24000
+        private const val PLAYBACK_SPEED = 1.1f
     }
 }

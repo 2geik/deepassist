@@ -25,7 +25,7 @@ class SpeechToText(private val apiKeyProvider: () -> String) {
     suspend fun transcribe(audioFile: File, language: String = "tr"): String? =
         withContext(Dispatchers.IO) {
             val apiKey = apiKeyProvider()
-            if (apiKey.isBlank() || !audioFile.exists() || OpenAiGate.isBlocked()) return@withContext null
+            if (apiKey.isBlank() || !audioFile.exists()) return@withContext null
 
             try {
                 val body = MultipartBody.Builder()
@@ -46,10 +46,7 @@ class SpeechToText(private val apiKeyProvider: () -> String) {
                     .build()
 
                 client.newCall(request).execute().use { resp ->
-                    if (!resp.isSuccessful) {
-                        OpenAiGate.fromHttpCode(resp.code)?.let { OpenAiGate.report("stt", it) }
-                        return@withContext null
-                    }
+                    if (!resp.isSuccessful) return@withContext null
                     val json = resp.body?.string() ?: return@withContext null
                     val obj = gson.fromJson(json, JsonObject::class.java)
                     obj.get("text")?.asString?.trim()?.takeIf { it.isNotBlank() }

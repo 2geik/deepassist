@@ -51,8 +51,7 @@ class DeepAssistSession(context: Context) : VoiceInteractionSession(context) {
 
 /**
  * Stub recognizer: voice_interaction.xml requires android:recognitionService,
- * but real recognition happens in the orchestrator. AndroidStt never picks this
- * stub (it would be calling itself).
+ * but all real speech recognition goes through Whisper in the orchestrator.
  */
 class DeepAssistRecognitionService : RecognitionService() {
 

@@ -38,18 +38,6 @@ object OverlayService {
         SessionActivity.ensureVisible(context)
     }
 
-    /** The answer so far, while it is being spoken; [showMessage] then sets the final text. */
-    fun showMessageProgress(context: Context, text: String) {
-        if (text.isBlank()) return
-        ChatSession.updateAssistantPartial(text)
-        SessionActivity.ensureVisible(context)
-    }
-
-    /** Ends a growing answer bubble without replacing its text. */
-    fun closeMessageProgress() {
-        ChatSession.closeAssistantPartial()
-    }
-
     fun showStatus(context: Context, text: String) {
         if (text.isBlank()) return
         ChatSession.addStatus(text)
