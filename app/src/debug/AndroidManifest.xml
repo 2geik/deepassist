@@ -11,6 +11,8 @@
             <intent-filter>
                 <action android:name="com.deepassist.DEBUG_PROMPT" />
                 <action android:name="com.deepassist.DUMP_SCREEN" />
+                <action android:name="com.deepassist.DEBUG_STT" />
+                <action android:name="com.deepassist.DEBUG_TTS" />
             </intent-filter>
         </receiver>
     </application>

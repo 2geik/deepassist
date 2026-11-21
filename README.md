@@ -6,7 +6,7 @@ deepAssist is an experimental Android voice assistant I developed for people who
 
 ## What it does
 
-- Voice input through OpenAI realtime transcription, with DeepSeek ASR as the fallback; spoken replies through OpenAI TTS, with Android TTS as the fallback. A soft sound repeats while the answer is being prepared.
+- Voice input through Meta's realtime transcription (Muse Voice Transcribe); spoken replies through OpenAI's realtime voice model (gpt-realtime-2.1-mini). Android's own speech recognizer and voice are the fallbacks; once a session falls back it stays there, so voices don't alternate. A soft sound repeats from the end of the request until the answer is spoken.
 - Tool based actions for calls, SMS, contacts, WhatsApp, notifications, media, YouTube, timers, device controls, location, weather, exchange rates, and web search.
 - **Camera ("gözüm ol"):** describes what is in front of the user, reads labels, bills and medicine boxes, counts Turkish lira. When reading a page it first guides the hand ("biraz sola çevir") with on-device text detection.
 - **Screen reading:** "ekranda ne yazıyor" reads the app on screen.
@@ -27,11 +27,11 @@ This is a prototype. Some actions depend on installed apps, Android version, gra
 You need Android Studio with Android SDK 36 and JDK 17. The Gradle wrapper is included; the app supports Android 8.0 (API 26) and newer.
 
 1. Clone the repository and open its root folder in Android Studio.
-2. Copy `.env.example` to `.env` in the repository root. Fill in `DEEPSEEK_API_KEY` and `OPENAI_API_KEY`; `TAVILY_API_KEY` is optional. Use your own keys and plain `KEY=value` lines without quotes. The Android SDK path belongs in `local.properties` or your usual Android environment configuration, not in `.env`.
+2. Copy `.env.example` to `.env` in the repository root. Fill in `DEEPSEEK_API_KEY`, `OPENAI_API_KEY` (voice) and `META_API_KEY` (speech recognition); `TAVILY_API_KEY` is optional. Without the OpenAI or Meta key the app uses Android's voice or recognizer. Use your own keys and plain `KEY=value` lines without quotes. The Android SDK path belongs in `local.properties` or your usual Android environment configuration, not in `.env`.
 3. Sync Gradle, select the `app` configuration, and run it on a device. From a terminal, `./gradlew assembleDebug` builds the APK.
 4. Grant only the permissions needed for the features you plan to use. The app's **Ayarlar** screen links to Android's permission and default assistant settings. It does not accept API keys; changing a key requires editing `.env`, rebuilding, and reinstalling the APK.
 
-A build with empty keys can compile, but voice transcription and assistant replies require the OpenAI and DeepSeek keys. Keep `.env` on your own machine. Do not attach your personal build artifact to a public release.
+A build with empty keys can compile, but assistant replies require the DeepSeek key; without the Meta and OpenAI keys speech goes through Android's recognizer and voice. Keep `.env` on your own machine. Do not attach your personal build artifact to a public release.
 
 ## How it is organized
 
@@ -62,6 +62,10 @@ Debug builds accept adb test hooks (DUMP-protected, so only adb can send them):
 ```bash
 adb shell am broadcast -p com.deepassist -a com.deepassist.DEBUG_PROMPT --es text "'saat kaç'"
 adb shell am broadcast -p com.deepassist -a com.deepassist.DUMP_SCREEN
+adb shell am broadcast -p com.deepassist -a com.deepassist.DEBUG_STT --es mode android
+adb shell am broadcast -p com.deepassist -a com.deepassist.DEBUG_TTS --es mode android
 ```
+
+`DEBUG_STT` / `DEBUG_TTS` with `mode android` use Android's recognizer / voice (the fallbacks) until the app restarts; `mode auto` goes back to Meta / OpenAI.
 
 `adb exec-out run-as com.deepassist cat files/diag.log` shows the on-device event log (triggers, service starts, crashes; no content).

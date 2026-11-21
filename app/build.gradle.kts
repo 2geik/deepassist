@@ -44,6 +44,10 @@ android {
             "String", "TAVILY_API_KEY",
             envBuildConfigString("TAVILY_API_KEY")
         )
+        buildConfigField(
+            "String", "META_API_KEY",
+            envBuildConfigString("META_API_KEY")
+        )
     }
 
     buildTypes {

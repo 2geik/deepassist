@@ -1,6 +1,5 @@
 package com.deepassist.service
 
-import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -11,10 +10,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
-import android.media.AudioFormat
 import android.media.AudioManager
-import android.media.AudioRecord
-import android.media.MediaRecorder
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -37,10 +33,10 @@ import com.deepassist.llm.SystemPrompt
 import com.deepassist.llm.ToolParser
 import com.deepassist.speech.AndroidTts
 import com.deepassist.speech.Earcons
-import com.deepassist.speech.OpenAiTts
-import com.deepassist.speech.RealtimeStt
-import com.deepassist.speech.RealtimeSttResult
-import com.deepassist.speech.DeepSeekAsr
+import com.deepassist.speech.AndroidStt
+import com.deepassist.speech.MetaStt
+import com.deepassist.speech.RealtimeTts
+import com.deepassist.speech.SttResult
 import com.deepassist.agent.ScreenAgent
 import com.deepassist.camera.LastPhoto
 import com.deepassist.tools.EndConversationTool
@@ -49,14 +45,9 @@ import com.deepassist.tools.ToolRegistry
 import com.deepassist.util.DiagLog
 import com.deepassist.util.Haptics
 import com.deepassist.util.PermissionsHelper
-import java.io.ByteArrayOutputStream
-import java.io.File
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
-import kotlin.math.abs
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -70,14 +61,13 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * Central orchestrator — cascaded STT → DeepSeek LLM → Android TTS.
+ * Central orchestrator — cascaded STT (Meta realtime) → DeepSeek LLM → TTS (OpenAI realtime).
  *
  * Flow (per turn):
- *   listenAndTranscribe() → DeepSeek streamChat() → (tool calls? execute,
+ *   transcribe() → DeepSeek streamChat() → (tool calls? execute,
  *   feed results back, repeat) → speak the final answer → reopen mic for
  *   a follow-up command.
  */
@@ -97,13 +87,24 @@ class AssistantForegroundService : Service() {
 
     private lateinit var deepSeek: DeepSeekClient
     private lateinit var memoryExtractor: MemoryExtractor
-    private lateinit var openAiTts: OpenAiTts
+    // TTS: OpenAI gpt-realtime-2.1-mini (one session per assistant session), Android TTS as fallback
+    private lateinit var realtimeTts: RealtimeTts
     private lateinit var androidTts: AndroidTts
     private lateinit var earcons: Earcons
 
-    // STT: OpenAI realtime streaming is the primary path, DeepSeek ASR the fallback
-    private lateinit var realtimeStt: RealtimeStt
-    private lateinit var deepSeekAsr: DeepSeekAsr
+    // STT: Meta Muse Voice Transcribe (realtime), Android's SpeechRecognizer as fallback
+    private lateinit var metaStt: MetaStt
+    private lateinit var androidStt: AndroidStt
+
+    // A fallback, once taken, holds for the rest of the session so the voice and the
+    // recognizer don't switch back and forth; across sessions for FALLBACK_HOLD_MS
+    @Volatile private var sttOnDevice = false
+    @Volatile private var ttsOnDevice = false
+    @Volatile private var metaDownUntil = 0L
+    @Volatile private var cloudTtsDownUntil = 0L
+
+    /** The "listening ended" chime of the current listen already played. */
+    @Volatile private var listenEndPlayed = false
 
     @Volatile private var currentSessionJob: Job? = null
     @Volatile private var currentChatId: String? = null
@@ -139,11 +140,11 @@ class AssistantForegroundService : Service() {
         conversation = ConversationManager()
         deepSeek = DeepSeekClient { secureStore.deepseekApiKey }
         memoryExtractor = MemoryExtractor(this, deepSeek)
-        openAiTts = OpenAiTts { secureStore.openAiApiKey }
+        realtimeTts = RealtimeTts { secureStore.openAiApiKey }
         androidTts = AndroidTts(this)
         earcons = Earcons(this)
-        realtimeStt = RealtimeStt { secureStore.openAiApiKey }
-        deepSeekAsr = DeepSeekAsr { secureStore.deepseekApiKey }
+        metaStt = MetaStt { secureStore.metaApiKey }
+        androidStt = AndroidStt(this)
         toolRegistry = ToolRegistry({ question -> askUser(question) }, deepSeek)
         Tool.playEarcon = { earcons.play(it) }
         Tool.say = { text -> awaitPhrase(); speak(text) }
@@ -246,6 +247,10 @@ class AssistantForegroundService : Service() {
                 // komutları ise bağlamı korur
                 conversation.clear()
                 currentChatId = resumeChatId
+                sttOnDevice = false
+                ttsOnDevice = false
+                // Connecting the voice takes ~1.5 s; do it while the user talks
+                if (cloudTtsUsable()) realtimeTts.warmUp()
                 val resumeRecord = resumeChatId?.let { chatHistory.load(it) }
                 val resumeTranscript = resumeRecord?.let { rec ->
                     rec.messages.takeLast(30).joinToString("\n") {
@@ -280,12 +285,13 @@ class AssistantForegroundService : Service() {
                         debugPrompt
                     } else {
                         startListeningFeedback("Dinliyorum...")
-                        listenAndTranscribe().also { earcon(open = false) }
+                        transcribe { partial -> overlayUserPartial(partial) }.also { listenEnded(it) }
                     }
 
                     if (text.isNullOrBlank()) {
+                        stopWaitingTone()
                         if (turn == 1) {
-                            // Without the DeepSeek key there is no answer and no ASR fallback
+                            // Without the DeepSeek key there is no answer to give
                             if (secureStore.hasDeepSeekKey() && !askedToRepeat) {
                                 // "Tekrar dener misin?" must really listen again: once
                                 askedToRepeat = true
@@ -295,9 +301,7 @@ class AssistantForegroundService : Service() {
                                 turn-- // still the first request
                                 continue
                             }
-                            val hint = if (!secureStore.hasOpenAiKey() && !secureStore.hasDeepSeekKey()) {
-                                "Bu sürüm OpenAI ve DeepSeek anahtarı olmadan derlenmiş, seni duyamıyorum."
-                            } else if (!secureStore.hasDeepSeekKey()) {
+                            val hint = if (!secureStore.hasDeepSeekKey()) {
                                 "Bu sürüm DeepSeek anahtarı olmadan derlenmiş, cevap veremiyorum."
                             } else {
                                 "Seni yine duyamadım, birazdan tekrar dene."
@@ -366,6 +370,7 @@ class AssistantForegroundService : Service() {
                     VoiceActivity.set(VoiceActivity.Phase.IDLE)
                     LastPhoto.clear()
                     currentChatId = null
+                    realtimeTts.close()
                     if (!hadError) updateNotification(computeStatusText())
                     hadError = false
                 }
@@ -387,177 +392,68 @@ class AssistantForegroundService : Service() {
     // STT
     // ==================================================================
 
-    private suspend fun listenAndTranscribe(): String? {
+    /**
+     * One listening turn, for requests and for ask_user answers: Meta's realtime
+     * recognizer, or Android's SpeechRecognizer when Meta is unavailable. After a Meta
+     * failure the session stays on Android (no switching back and forth), and the
+     * next sessions skip Meta for [FALLBACK_HOLD_MS].
+     *
+     * @param onPartial live transcript for the panel; null for ask_user answers.
+     */
+    private suspend fun transcribe(onPartial: ((String) -> Unit)?): String? {
         if (!PermissionsHelper.hasMicrophone(this)) return null
+        val partial: (String) -> Unit = { text -> onPartial?.invoke(text) }
 
-        // Primary path: realtime streaming STT — audio uploads while the user
-        // is still talking and the transcript types into the overlay live
-        if (secureStore.hasOpenAiKey()) {
-            when (val result = realtimeStt.listen { partial -> overlayUserPartial(partial) }) {
-                is RealtimeSttResult.Final -> return result.text
-                is RealtimeSttResult.NoSpeech -> return null
-                is RealtimeSttResult.Unavailable -> result.speechPcm24k?.let { pcm ->
-                    // What the user said while OpenAI failed goes to DeepSeek ASR
-                    updateNotification("Anlıyorum...")
-                    overlayStatus("Anlıyorum...")
-                    return transcribeFallback(wav16kFrom24k(pcm))
+        if (metaUsable()) {
+            when (val result = metaStt.listen(partial) { speechEnded() }) {
+                is SttResult.Final -> return result.text
+                is SttResult.NoSpeech -> return null
+                is SttResult.Unavailable -> {
+                    sttOnDevice = true
+                    metaDownUntil = SystemClock.elapsedRealtime() + FALLBACK_HOLD_MS
+                    DiagLog.event("Speech", "STT fallback android")
+                    // The words said meanwhile are lost: the listening chime asks again
+                    if (result.heardSpeech) earcon(open = true)
                 }
             }
         }
-
-        val audio = recordAudio() ?: return null
-        updateNotification("Anlıyorum...")
-        overlayStatus("Anlıyorum...")
-        return transcribeFallback(audio)
-    }
-
-    /** STT for ask_user — primary path: realtime streaming websocket,
-     *  fallback: DeepSeek ASR on a recording. */
-    private suspend fun transcribeWithFallback(): String? {
-        if (!PermissionsHelper.hasMicrophone(this)) return null
-        if (secureStore.hasOpenAiKey()) {
-            when (val result = realtimeStt.listen { /* no partial — question asked */ }) {
-                is RealtimeSttResult.Final -> return result.text
-                is RealtimeSttResult.NoSpeech -> return null
-                is RealtimeSttResult.Unavailable -> result.speechPcm24k?.let { pcm ->
-                    return transcribeFallback(wav16kFrom24k(pcm))
-                }
-            }
-        }
-        val audio = recordAudio() ?: return null
-        return transcribeFallback(audio)
-    }
-
-    /** DeepSeek ASR on a recording; the file is deleted either way. */
-    private suspend fun transcribeFallback(audio: File): String? {
-        DiagLog.event("Speech", "STT fallback deepseek")
-        return try {
-            deepSeekAsr.transcribe(audio)
-        } finally {
-            audio.delete()
+        if (!androidStt.isAvailable()) return null
+        return when (val result = androidStt.listen(partial) { speechEnded() }) {
+            is SttResult.Final -> result.text
+            else -> null
         }
     }
 
-    /** Records 16kHz mono PCM16; stops after 3s of silence or 8s total. Fallback only. */
-    @SuppressLint("MissingPermission")
-    private suspend fun recordAudio(): File? = withContext(Dispatchers.IO) {
-        if (!PermissionsHelper.hasMicrophone(this@AssistantForegroundService)) return@withContext null
+    private fun metaUsable(): Boolean =
+        secureStore.hasMetaKey() && !sttOnDevice &&
+            SystemClock.elapsedRealtime() >= metaDownUntil &&
+            !(BuildConfig.DEBUG && debugSttMode == SPEECH_MODE_ANDROID)
 
-        val sampleRate = 16000
-        val minBuf = AudioRecord.getMinBufferSize(
-            sampleRate,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT
-        )
-        if (minBuf <= 0) return@withContext null
+    private fun cloudTtsUsable(): Boolean =
+        secureStore.hasOpenAiKey() && !ttsOnDevice &&
+            SystemClock.elapsedRealtime() >= cloudTtsDownUntil &&
+            !(BuildConfig.DEBUG && debugTtsMode == SPEECH_MODE_ANDROID)
 
-        val recorder = try {
-            AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                sampleRate,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                maxOf(minBuf * 2, sampleRate) // ≥0.5s buffer
-            )
-        } catch (e: Exception) {
-            return@withContext null
+    /**
+     * The microphone stopped because the user is done: the "listening ended" chime,
+     * and the waiting sound runs until the answer is spoken.
+     */
+    private fun speechEnded() {
+        if (!listenEndPlayed) {
+            listenEndPlayed = true
+            earcon(open = false)
         }
-        if (recorder.state != AudioRecord.STATE_INITIALIZED) {
-            recorder.release()
-            return@withContext null
-        }
-
-        val pcm = ByteArrayOutputStream()
-        val buffer = ShortArray(sampleRate / 10) // 100ms chunks
-        var silenceMs = 0L
-        var heardSpeech = false
-        val start = SystemClock.elapsedRealtime()
-
-        try {
-            recorder.startRecording()
-            while (SystemClock.elapsedRealtime() - start < MAX_RECORD_MS) {
-                val read = recorder.read(buffer, 0, buffer.size)
-                if (read <= 0) break
-
-                var maxAmp = 0
-                val bytes = ByteArray(read * 2)
-                for (i in 0 until read) {
-                    val sample = buffer[i].toInt()
-                    val amp = abs(sample)
-                    if (amp > maxAmp) maxAmp = amp
-                    bytes[i * 2] = (sample and 0xFF).toByte()
-                    bytes[i * 2 + 1] = ((sample shr 8) and 0xFF).toByte()
-                }
-                pcm.write(bytes)
-
-                VoiceActivity.reportPeak(maxAmp)
-                val chunkMs = read * 1000L / sampleRate
-                if (maxAmp < SILENCE_THRESHOLD) {
-                    silenceMs += chunkMs
-                    if (silenceMs >= SILENCE_STOP_MS) break
-                } else {
-                    heardSpeech = true
-                    silenceMs = 0
-                }
-            }
-        } finally {
-            runCatching { recorder.stop() }
-            recorder.release()
-        }
-
-        if (!heardSpeech) return@withContext null
-        val pcmBytes = pcm.toByteArray()
-        if (pcmBytes.size < sampleRate / 5 * 2) return@withContext null // <200ms of audio
-
-        val wav = File(cacheDir, "rec_${System.currentTimeMillis()}.wav")
-        writeWav(wav, pcmBytes, sampleRate, channels = 1, bitsPerSample = 16)
-        wav
+        VoiceActivity.set(VoiceActivity.Phase.THINKING)
+        startWaitingTone()
     }
 
-    /** 24 kHz mono PCM16 from the realtime attempt → a 16 kHz WAV for DeepSeek ASR. */
-    private fun wav16kFrom24k(pcm24k: ByteArray): File {
-        val inSamples = pcm24k.size / 2
-        val outSamples = inSamples * 2 / 3
-        val out = ByteArray(outSamples * 2)
-        fun sample(i: Int): Int {
-            val j = i.coerceIn(0, inSamples - 1) * 2
-            return (pcm24k[j].toInt() and 0xFF) or (pcm24k[j + 1].toInt() shl 8)
+    /** After a listen: the end chime if the recognizer didn't signal the end itself. */
+    private fun listenEnded(text: String?) {
+        if (!listenEndPlayed) {
+            listenEndPlayed = true
+            earcon(open = false)
         }
-        for (k in 0 until outSamples) {
-            // Linear interpolation at 1.5 input samples per output sample
-            val pos = k * 3 / 2.0
-            val i = pos.toInt()
-            val frac = pos - i
-            val v = (sample(i) * (1 - frac) + sample(i + 1) * frac).toInt()
-            out[k * 2] = (v and 0xFF).toByte()
-            out[k * 2 + 1] = ((v shr 8) and 0xFF).toByte()
-        }
-        val wav = File(cacheDir, "rec_${System.currentTimeMillis()}.wav")
-        writeWav(wav, out, 16000, channels = 1, bitsPerSample = 16)
-        return wav
-    }
-
-    private fun writeWav(file: File, pcm: ByteArray, sampleRate: Int, channels: Int, bitsPerSample: Int) {
-        val byteRate = sampleRate * channels * bitsPerSample / 8
-        val blockAlign = channels * bitsPerSample / 8
-        val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
-        header.put("RIFF".toByteArray(Charsets.US_ASCII))
-        header.putInt(36 + pcm.size)
-        header.put("WAVE".toByteArray(Charsets.US_ASCII))
-        header.put("fmt ".toByteArray(Charsets.US_ASCII))
-        header.putInt(16)
-        header.putShort(1) // PCM
-        header.putShort(channels.toShort())
-        header.putInt(sampleRate)
-        header.putInt(byteRate)
-        header.putShort(blockAlign.toShort())
-        header.putShort(bitsPerSample.toShort())
-        header.put("data".toByteArray(Charsets.US_ASCII))
-        header.putInt(pcm.size)
-        file.outputStream().use {
-            it.write(header.array())
-            it.write(pcm)
-        }
+        if (text.isNullOrBlank()) stopWaitingTone()
     }
 
     // ==================================================================
@@ -808,8 +704,8 @@ class AssistantForegroundService : Service() {
         if (!listening.compareAndSet(false, true)) return
         try {
             startListeningFeedback("Cevabını dinliyorum...")
-            val text = transcribeWithFallback()
-            earcon(open = false)
+            val text = transcribe(onPartial = null)
+            listenEnded(text)
             if (!text.isNullOrBlank()) overlayUser(text)
             val cont = pendingQuestion
             pendingQuestion = null
@@ -825,6 +721,11 @@ class AssistantForegroundService : Service() {
     // Speech
     // ==================================================================
 
+    /**
+     * Speaks [text] with the realtime voice, or with Android's voice when the realtime
+     * one can't start within 3 s. After such a failure the session stays on Android's
+     * voice so the two don't alternate.
+     */
     private suspend fun speak(text: String) {
         if (!secureStore.voiceResponseEnabled || text.isBlank()) return
         val budgetMs = (SPEAK_BASE_MS + text.length * SPEAK_PER_CHAR_MS).coerceAtMost(SPEAK_MAX_MS)
@@ -837,12 +738,19 @@ class AssistantForegroundService : Service() {
                 delay(budgetMs)
                 timedOut.set(true)
                 Log.w(TAG, "speak watchdog fired after ${budgetMs}ms")
-                runCatching { openAiTts.stop() }
+                runCatching { realtimeTts.stop() }
                 runCatching { androidTts.stop() }
             }
             try {
-                val played = secureStore.hasOpenAiKey() && openAiTts.speak(text)
-                if (!played && !timedOut.get()) androidTts.speak(text)
+                val outcome = if (cloudTtsUsable()) realtimeTts.speak(text) else RealtimeTts.Outcome.FAILED
+                if (outcome == RealtimeTts.Outcome.FAILED && !timedOut.get()) {
+                    if (!ttsOnDevice && cloudTtsUsable()) {
+                        ttsOnDevice = true
+                        cloudTtsDownUntil = SystemClock.elapsedRealtime() + FALLBACK_HOLD_MS
+                        DiagLog.event("Speech", "TTS fallback android")
+                    }
+                    androidTts.speak(text)
+                }
             } finally {
                 watchdog.cancel()
                 if (VoiceActivity.phase.value == VoiceActivity.Phase.SPEAKING) {
@@ -926,7 +834,7 @@ class AssistantForegroundService : Service() {
         // The answer listener runs outside the session job; it must not keep the mic
         pendingListenJob?.cancel()
         pendingListenJob = null
-        runCatching { openAiTts.stop() }
+        runCatching { realtimeTts.stop() }
         runCatching { androidTts.stop() }
         listening.set(false)
         processing.set(false)
@@ -997,7 +905,7 @@ class AssistantForegroundService : Service() {
                     }
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                         // Temporary loss (notification sound, navigation prompt)
-                        runCatching { openAiTts.stop() }
+                        runCatching { realtimeTts.stop() }
                         runCatching { androidTts.stop() }
                     }
                     else -> Unit
@@ -1032,6 +940,7 @@ class AssistantForegroundService : Service() {
     // ==================================================================
 
     private fun startListeningFeedback(text: String) {
+        listenEndPlayed = false
         updateNotification(text.take(120))
         if (PermissionsHelper.hasOverlay(this)) OverlayService.showListening(this, text)
         VoiceActivity.set(VoiceActivity.Phase.LISTENING)
@@ -1234,7 +1143,8 @@ class AssistantForegroundService : Service() {
         screenOffReceiver = null
         pendingQuestion?.let { if (it.isActive) it.cancel() }
         pendingQuestion = null
-        runCatching { openAiTts.stop() }
+        runCatching { realtimeTts.stop() }
+        runCatching { realtimeTts.close() }
         runCatching { androidTts.stop() }
         runCatching { androidTts.shutdown() }
         earcons.release()
@@ -1254,6 +1164,16 @@ class AssistantForegroundService : Service() {
         const val ACTION_DEBUG_PROMPT = "com.deepassist.DEBUG_PROMPT"
         const val EXTRA_DEBUG_TEXT = "text"
         const val EXTRA_RESUME_CHAT_ID = "resume_chat_id"
+
+        const val SPEECH_MODE_AUTO = "auto"
+        const val SPEECH_MODE_ANDROID = "android"
+
+        /** Debug builds: "android" uses Android's recognizer / voice even when the cloud works. */
+        @Volatile
+        var debugSttMode = SPEECH_MODE_AUTO
+
+        @Volatile
+        var debugTtsMode = SPEECH_MODE_AUTO
 
         private const val TAG = "AssistantFgs"
 
@@ -1301,9 +1221,8 @@ class AssistantForegroundService : Service() {
         private const val MAX_TOOL_ROUNDS = 6
         private const val MAX_CONVERSATION_TURNS = 50
         private const val ASK_USER_TIMEOUT_MS = 30_000L
-        private const val MAX_RECORD_MS = 8_000L
-        private const val SILENCE_STOP_MS = 3_000L
-        private const val SILENCE_THRESHOLD = 500
+        /** After a cloud STT/TTS failure, the next sessions start on Android's for this long. */
+        private const val FALLBACK_HOLD_MS = 5 * 60 * 1000L
         private const val PREVIOUS_SESSION_JOIN_MS = 2_000L
         private const val WAIT_TONE_FIRST_MS = 700L
         private const val WAIT_TONE_INTERVAL_MS = 2_500L

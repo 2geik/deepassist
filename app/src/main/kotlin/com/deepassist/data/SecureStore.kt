@@ -30,6 +30,9 @@ class SecureStore(context: Context) {
 
     val tavilyApiKey: String get() = BuildConfig.TAVILY_API_KEY
 
+    /** Meta Model API key (Muse Voice Transcribe, speech-to-text). */
+    val metaApiKey: String get() = BuildConfig.META_API_KEY
+
     /** Reading documents with the camera first guides the hand ("biraz sola çevir"). */
     var framingGuideEnabled: Boolean
         get() = prefs.getBoolean(KEY_FRAMING_GUIDE, true)
@@ -42,6 +45,8 @@ class SecureStore(context: Context) {
     fun hasOpenAiKey(): Boolean = openAiApiKey.isNotBlank()
 
     fun hasDeepSeekKey(): Boolean = deepseekApiKey.isNotBlank()
+
+    fun hasMetaKey(): Boolean = metaApiKey.isNotBlank()
 
     companion object {
         private const val KEY_VOICE_RESPONSE = "voice_response_enabled"
