@@ -12,6 +12,9 @@ class DeepAssistApp : Application() {
         processStartedAt = SystemClock.elapsedRealtime()
         DiagLog.init(this)
         Net.init(this)
+        // The accessibility service starts the process after boot and updates, well before
+        // the first request: refresh the API addresses now (the Wi-Fi's DNS can take 30 s)
+        Net.prefetch(*Net.API_HOSTS)
         DiagLog.event("App", "process start")
 
         // Record why the process died before the system's handler kills it
