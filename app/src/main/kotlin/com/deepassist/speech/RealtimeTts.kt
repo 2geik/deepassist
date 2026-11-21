@@ -229,7 +229,8 @@ class RealtimeTts(private val apiKeyProvider: () -> String) {
     /** Cuts the current utterance (session end, audio focus loss, watchdog); keeps the session. */
     fun stop() {
         stopRequested = true
-        conn?.let { cancelResponse(it, null) }
+        // Only a response that is playing can be cancelled (else the API answers with an error)
+        if (currentEvents != null) conn?.let { cancelResponse(it, null) }
         currentEvents?.close()
         currentTrack?.let {
             runCatching { it.pause() }

@@ -55,14 +55,26 @@ class MetaStt(private val apiKeyProvider: () -> String) {
 
             val events = Channel<String>(Channel.UNLIMITED)
             val closeNote = AtomicReference<String?>(null)
+            val openedAt = SystemClock.elapsedRealtime()
+            val firstFrameLogged = AtomicBoolean(false)
             val request = Request.Builder().url(ENDPOINT).build()
             val socket = client.newWebSocket(request, object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
+                    DiagLog.event("Speech", "Meta STT socket open ${SystemClock.elapsedRealtime() - openedAt} ms")
                     // The key goes in the first frame; the endpoint ignores HTTP auth headers
                     webSocket.send(gson.toJson(handshake(apiKey)))
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
+                    if (firstFrameLogged.compareAndSet(false, true)) {
+                        // Field names only, never values
+                        val keys = runCatching { gson.fromJson(text, JsonObject::class.java).keySet().sorted() }
+                            .getOrNull()?.joinToString(",") ?: "not json"
+                        DiagLog.event(
+                            "Speech",
+                            "Meta STT first frame ${SystemClock.elapsedRealtime() - openedAt} ms [$keys]"
+                        )
+                    }
                     events.trySend(text)
                 }
 

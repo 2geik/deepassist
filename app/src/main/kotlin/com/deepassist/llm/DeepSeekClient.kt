@@ -15,6 +15,9 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -67,67 +70,96 @@ class DeepSeekClient(private val apiKeyProvider: () -> String) {
         }
 
         val request = buildRequest(apiKey, messages, tools, stream = true)
-        client.newCall(request).execute().use { resp ->
-            if (!resp.isSuccessful) {
-                val detail = try {
-                    resp.body?.string()?.take(300)
-                } catch (e: Exception) {
-                    null
+        val call = client.newCall(request)
+        coroutineScope {
+            // A blocking socket read ignores coroutine cancellation: cancel the HTTP call
+            // itself, so ending a session stops the request at once instead of waiting for it
+            val canceller = launch {
+                try {
+                    awaitCancellation()
+                } finally {
+                    call.cancel()
                 }
-                emit(StreamEvent(error = "DeepSeek API hatası (HTTP ${resp.code}). ${detail.orEmpty()}"))
-                return@use
             }
-            val source = resp.body?.source()
-            if (source == null) {
-                emit(StreamEvent(error = "DeepSeek API boş yanıt döndürdü."))
-                return@use
-            }
-
-            val accumulating = sortedMapOf<Int, AccumulatingToolCall>()
-            var announcedFirstToolCall = false
-            val reasoning = StringBuilder()
-
-            while (true) {
-                val line = source.readUtf8Line() ?: break
-                if (line.isBlank() || !line.startsWith("data:")) continue
-                val data = line.removePrefix("data:").trim()
-                if (data == "[DONE]") break
-
-                val parsed = try {
-                    gson.fromJson(data, StreamResponse::class.java)
-                } catch (e: Exception) {
-                    null
-                } ?: continue
-                val choice = parsed.choices?.firstOrNull() ?: continue
-                val delta = choice.delta
-
-                delta?.reasoning_content?.let { reasoning.append(it) }
-
-                // Disjoint branches (gotcha #6): a delta is either tool-call data or content
-                when {
-                    delta?.tool_calls != null -> {
-                        for (tc in delta.tool_calls) {
-                            val acc = accumulating.getOrPut(tc.index) { AccumulatingToolCall(tc.index) }
-                            tc.id?.let { acc.id = it }
-                            tc.function?.name?.let { acc.name = (acc.name ?: "") + it }
-                            tc.function?.arguments?.let { acc.arguments.append(it) }
+            try {
+                call.execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        val detail = try {
+                            resp.body?.string()?.take(300)
+                        } catch (e: Exception) {
+                            null
                         }
-                        // Early signal so the orchestrator can speak the thinking phrase
-                        // as soon as the first tool call is identified
-                        if (!announcedFirstToolCall) {
-                            val first = accumulating.values.firstOrNull()
-                            if (first != null && !first.name.isNullOrBlank()) {
-                                announcedFirstToolCall = true
-                                emit(StreamEvent(toolCalls = listOf(first)))
+                        emit(StreamEvent(error = "DeepSeek API hatası (HTTP ${resp.code}). ${detail.orEmpty()}"))
+                        return@use
+                    }
+                    val source = resp.body?.source()
+                    if (source == null) {
+                        emit(StreamEvent(error = "DeepSeek API boş yanıt döndürdü."))
+                        return@use
+                    }
+
+                    val accumulating = sortedMapOf<Int, AccumulatingToolCall>()
+                    var announcedFirstToolCall = false
+                    val reasoning = StringBuilder()
+
+                    while (true) {
+                        val line = source.readUtf8Line() ?: break
+                        if (line.isBlank() || !line.startsWith("data:")) continue
+                        val data = line.removePrefix("data:").trim()
+                        if (data == "[DONE]") break
+
+                        val parsed = try {
+                            gson.fromJson(data, StreamResponse::class.java)
+                        } catch (e: Exception) {
+                            null
+                        } ?: continue
+                        val choice = parsed.choices?.firstOrNull() ?: continue
+                        val delta = choice.delta
+
+                        delta?.reasoning_content?.let { reasoning.append(it) }
+
+                        // Disjoint branches (gotcha #6): a delta is either tool-call data or content
+                        when {
+                            delta?.tool_calls != null -> {
+                                for (tc in delta.tool_calls) {
+                                    val acc = accumulating.getOrPut(tc.index) { AccumulatingToolCall(tc.index) }
+                                    tc.id?.let { acc.id = it }
+                                    tc.function?.name?.let { acc.name = (acc.name ?: "") + it }
+                                    tc.function?.arguments?.let { acc.arguments.append(it) }
+                                }
+                                // Early signal so the orchestrator can speak the thinking phrase
+                                // as soon as the first tool call is identified
+                                if (!announcedFirstToolCall) {
+                                    val first = accumulating.values.firstOrNull()
+                                    if (first != null && !first.name.isNullOrBlank()) {
+                                        announcedFirstToolCall = true
+                                        emit(StreamEvent(toolCalls = listOf(first)))
+                                    }
+                                }
+                            }
+                            delta?.content != null -> emit(StreamEvent(contentDelta = delta.content))
+                        }
+
+                        // finish_reason handled separately so it is never clobbered
+                        when (choice.finish_reason) {
+                            "tool_calls" -> {
+                                emit(
+                                    StreamEvent(
+                                        toolCalls = accumulating.values.toList(),
+                                        finishReason = "tool_calls",
+                                        reasoning = reasoning.toString().ifEmpty { null }
+                                    )
+                                )
+                                return@use
+                            }
+                            "stop" -> {
+                                emit(StreamEvent(finishReason = "stop", isComplete = true))
+                                return@use
                             }
                         }
                     }
-                    delta?.content != null -> emit(StreamEvent(contentDelta = delta.content))
-                }
-
-                // finish_reason handled separately so it is never clobbered
-                when (choice.finish_reason) {
-                    "tool_calls" -> {
+                    // Stream ended without an explicit finish_reason
+                    if (accumulating.isNotEmpty()) {
                         emit(
                             StreamEvent(
                                 toolCalls = accumulating.values.toList(),
@@ -135,25 +167,12 @@ class DeepSeekClient(private val apiKeyProvider: () -> String) {
                                 reasoning = reasoning.toString().ifEmpty { null }
                             )
                         )
-                        return@use
-                    }
-                    "stop" -> {
+                    } else {
                         emit(StreamEvent(finishReason = "stop", isComplete = true))
-                        return@use
                     }
                 }
-            }
-            // Stream ended without an explicit finish_reason
-            if (accumulating.isNotEmpty()) {
-                emit(
-                    StreamEvent(
-                        toolCalls = accumulating.values.toList(),
-                        finishReason = "tool_calls",
-                        reasoning = reasoning.toString().ifEmpty { null }
-                    )
-                )
-            } else {
-                emit(StreamEvent(finishReason = "stop", isComplete = true))
+            } finally {
+                canceller.cancel()
             }
         }
     }
