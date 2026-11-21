@@ -51,8 +51,16 @@ object Net {
 
     private val cache = ConcurrentHashMap<String, Entry>()
     private val refreshing = ConcurrentHashMap.newKeySet<String>()
-    // A lookup on the broken resolver holds its thread for up to 30 s
-    private val resolver = Executors.newFixedThreadPool(8) { r -> Thread(r, "dns").apply { isDaemon = true } }
+    /** Background refreshes, a few at a time. */
+    private val refresher = Executors.newFixedThreadPool(3) { r -> Thread(r, "dns-refresh").apply { isDaemon = true } }
+
+    /**
+     * The two lookups of a race. Unbounded and separate from [refresher]: a refresh waits
+     * for its lookups, and sharing one fixed pool let 12 refreshes take every thread
+     * while their lookups queued behind them (all timed out on 21 November). A lookup
+     * on the broken resolver holds its thread for up to 30 s.
+     */
+    private val lookups = Executors.newCachedThreadPool { r -> Thread(r, "dns-lookup").apply { isDaemon = true } }
 
     /** Talks to 1.1.1.1 by IP: no DNS needed to reach it. */
     private val dohClient = OkHttpClient.Builder()
@@ -90,7 +98,7 @@ object Net {
     private fun refreshAsync(host: String) {
         if (!refreshing.add(host)) return
         runCatching {
-            resolver.execute {
+            refresher.execute {
                 try {
                     resolveNow(host)
                 } catch (e: Exception) {
@@ -118,8 +126,8 @@ object Net {
     /** System resolver and DNS over HTTPS at once; the first non-empty answer, IPv4 first. */
     private fun race(host: String): Pair<List<InetAddress>, String> {
         val answers = LinkedBlockingQueue<Pair<Result<List<InetAddress>>, String>>()
-        resolver.execute { answers.offer(runCatching { Dns.SYSTEM.lookup(host) } to "system") }
-        resolver.execute { answers.offer(runCatching { dohLookup(host) } to "doh") }
+        lookups.execute { answers.offer(runCatching { Dns.SYSTEM.lookup(host) } to "system") }
+        lookups.execute { answers.offer(runCatching { dohLookup(host) } to "doh") }
         val deadline = SystemClock.elapsedRealtime() + RACE_TIMEOUT_MS
         var lastError: Throwable? = null
         repeat(2) {
