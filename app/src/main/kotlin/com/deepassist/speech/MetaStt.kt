@@ -1,5 +1,6 @@
 package com.deepassist.speech
 
+import com.deepassist.util.receiveCatchingOrNull
 import com.deepassist.util.Net.forApi
 import android.os.SystemClock
 import com.deepassist.service.VoiceActivity
@@ -17,7 +18,6 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -140,7 +140,7 @@ class MetaStt(private val apiKeyProvider: () -> String) {
                     }
 
                     while (result == null) {
-                        val tick = withTimeoutOrNull(TICK_MS) { events.receiveCatching() }
+                        val tick = events.receiveCatchingOrNull(TICK_MS)
                         val now = SystemClock.elapsedRealtime()
                         if (tick != null && tick.isClosed) {
                             result = when {

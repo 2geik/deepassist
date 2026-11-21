@@ -1,5 +1,6 @@
 package com.deepassist.speech
 
+import com.deepassist.util.receiveCatchingOrNull
 import com.deepassist.util.Net.forApi
 import android.media.AudioAttributes
 import android.media.AudioFormat
@@ -172,7 +173,7 @@ class RealtimeTts(private val apiKeyProvider: () -> String) {
                 val next = if (waitMs == null) {
                     events.receiveCatching()
                 } else {
-                    withTimeoutOrNull(waitMs.coerceAtLeast(1L)) { events.receiveCatching() }
+                    events.receiveCatchingOrNull(waitMs.coerceAtLeast(1L))
                 }
                 if (next == null) {
                     DiagLog.event("Speech", "realtime TTS no audio in ${FIRST_AUDIO_TIMEOUT_MS} ms")
