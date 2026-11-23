@@ -111,6 +111,11 @@ class WhatsAppTool : Tool() {
             }
         }
 
+        // Sending through the chat screen needs it visible, not behind the lock screen
+        ScreenUnlock.ensure(context)?.let { why ->
+            return@withContext ToolResult(false, "", error = "Mesaj gönderilmedi. $why", speakDirectly = true)
+        }
+
         val encoded = Uri.encode(message)
         val direct = Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/$number?text=$encoded")).apply {
             setPackage("com.whatsapp")

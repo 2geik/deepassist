@@ -105,6 +105,10 @@ class PhoneActionTool : Tool() {
     override val required = listOf("action")
     override val waitForSpeech = false
 
+    // Alarms and timers are set without showing the clock app; everything else opens a screen
+    override fun needsUnlockedScreen(args: JsonObject): Boolean =
+        args.optString("action") !in setOf("set_alarm", "set_timer")
+
     override fun dynamicThinkingPhrase(args: JsonObject): String? {
         val action = args.optString("action")
         return when (action) {

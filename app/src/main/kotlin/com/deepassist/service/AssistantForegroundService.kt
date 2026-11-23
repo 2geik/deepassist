@@ -40,6 +40,7 @@ import com.deepassist.speech.SttResult
 import com.deepassist.agent.ScreenAgent
 import com.deepassist.camera.LastPhoto
 import com.deepassist.tools.EndConversationTool
+import com.deepassist.tools.ScreenUnlock
 import com.deepassist.tools.Tool
 import com.deepassist.tools.ToolRegistry
 import com.deepassist.util.DiagLog
@@ -648,6 +649,21 @@ class AssistantForegroundService : Service() {
                     updateNotification(phrase.take(120))
                     overlayStatus(phrase)
                     speakAsync(phrase)
+                }
+            }
+
+            // An app opened on the lock screen stays hidden behind it: unlock first,
+            // or tell the user to (PIN/pattern) and skip the call if it stays locked
+            if (tool.needsUnlockedScreen(args)) {
+                waitingPaused = true
+                val blocked = try {
+                    ScreenUnlock.ensure(this)
+                } finally {
+                    waitingPaused = false
+                }
+                if (blocked != null) {
+                    results[callId] = ToolResult(false, "", error = blocked, speakDirectly = true)
+                    continue
                 }
             }
 

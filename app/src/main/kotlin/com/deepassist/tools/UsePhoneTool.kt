@@ -1,9 +1,7 @@
 package com.deepassist.tools
 
-import android.app.KeyguardManager
 import android.os.PowerManager
 import android.util.Log
-import com.deepassist.SessionActivity
 import com.deepassist.agent.PanelControl
 import com.deepassist.agent.ScreenAgent
 import com.deepassist.agent.ShortcutStore
@@ -13,9 +11,6 @@ import com.deepassist.llm.DeepSeekClient
 import com.deepassist.service.AccessibilitySvc
 import com.deepassist.speech.Earcons
 import com.google.gson.JsonObject
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
 
 /**
  * use_phone: the screen agent as a tool. Anything the dedicated tools can't do
@@ -52,7 +47,7 @@ class UsePhoneTool(private val deepSeek: DeepSeekClient) : Tool() {
                 "Telefonu kullanma iznim eksik. Bir yakının erişilebilirlik ayarlarında deepAssist'i kapatıp tekrar açmalı."
             )
         }
-        unlockIfPossible()?.let { return spoken(false, it) }
+        ScreenUnlock.ensure(context)?.let { return spoken(false, it) }
 
         val power = context.getSystemService(PowerManager::class.java)
         @Suppress("DEPRECATION")
@@ -83,20 +78,6 @@ class UsePhoneTool(private val deepSeek: DeepSeekClient) : Tool() {
             // The panel comes back with the spoken result and the follow-up question
             PanelControl.restore()
         }
-    }
-
-    /** Null when the screen is usable; otherwise what to tell the user. */
-    private suspend fun unlockIfPossible(): String? {
-        val keyguard = context.getSystemService(KeyguardManager::class.java) ?: return null
-        if (!keyguard.isKeyguardLocked) return null
-        if (keyguard.isDeviceSecure) return "Telefon kilitli. Kilidi açarsan devam edebilirim."
-        val panel = SessionActivity.instance ?: return "Telefon kilitli. Kilidi açarsan devam edebilirim."
-        withContext(Dispatchers.Main) { keyguard.requestDismissKeyguard(panel, null) }
-        repeat(20) {
-            if (!keyguard.isKeyguardLocked) return null
-            delay(100)
-        }
-        return "Ekran kilidini açamadım. Kilidi açarsan devam edebilirim."
     }
 
     private fun spoken(ok: Boolean, text: String) =

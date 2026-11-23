@@ -219,6 +219,9 @@ class WhatsAppCallTool : Tool() {
     private fun isVideo(args: JsonObject): Boolean =
         runCatching { args.get("video")?.asBoolean == true }.getOrDefault(false)
 
+    // The call screen opens in WhatsApp; only the confirmed call starts it
+    override fun needsUnlockedScreen(args: JsonObject): Boolean = isConfirmed(args)
+
     private fun isConfirmed(args: JsonObject): Boolean =
         runCatching { args.get("confirmed")?.asBoolean == true }.getOrDefault(false)
 

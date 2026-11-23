@@ -71,6 +71,13 @@ abstract class Tool {
         var playEarcon: ((com.deepassist.speech.Earcons.Sound) -> Unit)? = null
     }
 
+    /**
+     * True when this call opens another app on screen. On the lock screen that app
+     * would stay hidden behind the keyguard, so the orchestrator unlocks first
+     * ([ScreenUnlock]) and skips the call when the phone stays locked.
+     */
+    open fun needsUnlockedScreen(args: JsonObject): Boolean = false
+
     /** Phrase computed once full arguments are available (e.g. "{isim}'i arıyorum..."). */
     open fun dynamicThinkingPhrase(args: JsonObject): String? = thinkingPhrase
 

@@ -44,6 +44,8 @@ class YoutubeVideoTool : Tool() {
     )
     override val required = listOf("query")
 
+    override fun needsUnlockedScreen(args: JsonObject) = true
+
     private data class Option(val video: YoutubeVideoResult, val watchedAt: Long?)
 
     private data class Options(val list: List<Option>, val hidden: Int, val allWatched: Boolean)

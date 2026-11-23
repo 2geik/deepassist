@@ -33,6 +33,8 @@ class YoutubeMusicTool : Tool() {
     )
     override val required = listOf("query")
 
+    override fun needsUnlockedScreen(args: JsonObject) = true
+
     // Options offered to the user, keyed by query, so pick=N opens exactly what was read out.
     private val resultCache = ConcurrentHashMap<String, List<YoutubeSearchClient.YoutubeVideoResult>>()
     private val cacheKeys = LinkedHashSet<String>()
