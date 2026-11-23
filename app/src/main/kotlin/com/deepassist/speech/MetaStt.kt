@@ -47,8 +47,19 @@ class MetaStt(private val apiKeyProvider: () -> String) {
     /**
      * Listens for one request. [onPartial] gets the text so far; [onSpeechEnd] is
      * called once, when the microphone stops because the user is done.
+     *
+     * With [echo] it listens while the assistant speaks (barge-in): what it hears is
+     * ignored, without time limits, until [echo] judges it to be the user rather
+     * than the answer coming back through the microphone. Then [onBargeIn] is
+     * called (the caller stops the voice) and from there on it is a normal listen.
+     * The caller cancels it when the answer ends without the user cutting in.
      */
-    suspend fun listen(onPartial: (String) -> Unit, onSpeechEnd: () -> Unit): SttResult =
+    suspend fun listen(
+        onPartial: (String) -> Unit,
+        onSpeechEnd: () -> Unit,
+        echo: EchoFilter? = null,
+        onBargeIn: () -> Unit = {}
+    ): SttResult =
         withContext(Dispatchers.IO) {
             val apiKey = apiKeyProvider()
             if (apiKey.isBlank()) return@withContext SttResult.Unavailable()
@@ -128,6 +139,13 @@ class MetaStt(private val apiKeyProvider: () -> String) {
                     var endSentAt = 0L
                     var result: SttResult? = null
                     var pump: kotlinx.coroutines.Job? = null
+                    // Barge-in: still only hearing the answer itself
+                    var gated = echo != null
+                    // Leading words of the barge-in turn that were still the voice
+                    var dropInTurn = 0
+                    var judged = 0
+                    // Timeouts count from when the user's request started
+                    var base = start
 
                     fun text(): String = listOf(done.toString().trim(), partial.trim())
                         .filter { it.isNotEmpty() }.joinToString(" ")
@@ -169,6 +187,35 @@ class MetaStt(private val apiKeyProvider: () -> String) {
                                     }
                                 }
 
+                                // During the answer every turn is the voice until judged otherwise
+                                gated && (type == "transcript" || type == "speechComplete") -> {
+                                    val t = obj.get("transcript")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty()
+                                    val verdict = echo!!.judge(t)
+                                    judged++
+                                    if (verdict.isUser) {
+                                        gated = false
+                                        base = now
+                                        heardSpeech = true
+                                        dropInTurn = verdict.echoPrefix
+                                        DiagLog.event(
+                                            "Speech",
+                                            "barge-in after ${now - start} ms: ${verdict.words} words, " +
+                                                "${verdict.novel} new, ${verdict.echoPrefix} echo, $judged judged"
+                                        )
+                                        onBargeIn()
+                                        partial = echo.dropWords(t, dropInTurn)
+                                        onPartial(text())
+                                        if (type == "speechComplete") {
+                                            done.append(partial.trim()).append(' ')
+                                            partial = ""
+                                            dropInTurn = 0
+                                            completeAt = now
+                                        }
+                                    }
+                                }
+
+                                gated && (type == "speechStart" || type == "speechEnd") -> Unit
+
                                 type == "speechStart" -> {
                                     if (!heardSpeech) DiagLog.event("Speech", "Meta STT speech started ${now - start} ms")
                                     heardSpeech = true
@@ -182,13 +229,15 @@ class MetaStt(private val apiKeyProvider: () -> String) {
                                     val t = obj.get("transcript")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty()
                                     if (t.isNotBlank()) {
                                         heardSpeech = true
-                                        partial = t
+                                        partial = if (dropInTurn > 0) echo!!.dropWords(t, dropInTurn) else t
                                         onPartial(text())
                                     }
                                 }
 
                                 type == "speechComplete" -> {
-                                    val t = obj.get("transcript")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty()
+                                    val raw = obj.get("transcript")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty()
+                                    val t = if (dropInTurn > 0) echo!!.dropWords(raw, dropInTurn) else raw
+                                    dropInTurn = 0
                                     if (t.isNotBlank()) done.append(t.trim()).append(' ')
                                     partial = ""
                                     if (done.isNotBlank()) onPartial(text())
@@ -221,6 +270,8 @@ class MetaStt(private val apiKeyProvider: () -> String) {
                         val serverQuiet = if (serverQuietSince != 0L) now - serverQuietSince else -1L
                         val quietFor = maxOf(localQuiet, serverQuiet)
                         when {
+                            // While the answer plays: no deadlines, the caller ends it
+                            gated && ackAt != 0L -> Unit
                             ackAt == 0L && now - start > CONNECT_TIMEOUT_MS -> {
                                 DiagLog.event("Speech", "Meta STT unavailable: connect timeout")
                                 result = SttResult.Unavailable(lastLoudAt.get() != 0L)
@@ -238,11 +289,11 @@ class MetaStt(private val apiKeyProvider: () -> String) {
                                 result = text().takeIf { it.isNotBlank() }?.let { SttResult.Final(it) }
                                     ?: SttResult.NoSpeech
                             }
-                            !heardSpeech && now - ackAt > NO_SPEECH_TIMEOUT_MS -> {
+                            !heardSpeech && now - maxOf(ackAt, base) > NO_SPEECH_TIMEOUT_MS -> {
                                 DiagLog.event("Speech", "Meta STT no speech")
                                 result = SttResult.NoSpeech
                             }
-                            endSentAt == 0L && (now - ackAt > OVERALL_TIMEOUT_MS || now - start > HARD_CAP_MS) ->
+                            endSentAt == 0L && (now - maxOf(ackAt, base) > OVERALL_TIMEOUT_MS || now - base > HARD_CAP_MS) ->
                                 endStream()
                         }
                     }

@@ -33,6 +33,7 @@ import com.deepassist.llm.SystemPrompt
 import com.deepassist.llm.ToolParser
 import com.deepassist.speech.AndroidTts
 import com.deepassist.speech.Earcons
+import com.deepassist.speech.EchoFilter
 import com.deepassist.speech.AndroidStt
 import com.deepassist.speech.MetaStt
 import com.deepassist.speech.RealtimeTts
@@ -58,6 +59,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.isActive
@@ -127,6 +129,15 @@ class AssistantForegroundService : Service() {
     @Volatile private var waitingPaused = false
     private var screenOffReceiver: BroadcastReceiver? = null
     @Volatile private var hadError = false
+
+    // The final answer is being spoken; the user may cut it short and talk instead
+    @Volatile private var answerSpeaking = false
+    // The voice now playing was cut on purpose: no on-device retry of it
+    @Volatile private var answerInterrupted = false
+    // What the user said over the last answer: the next request, without listening again
+    @Volatile private var bargedInText: String? = null
+    // The next request follows an answer the user cut short: the model is told so
+    @Volatile private var lastAnswerCutShort = false
 
     // Bumped per trigger so a cancelled session's cleanup can't clobber its successor
     private val sessionGeneration = AtomicInteger(0)
@@ -226,6 +237,10 @@ class AssistantForegroundService : Service() {
             return
         }
 
+        // While an answer is being read out, the trigger (assist long-press) means
+        // "stop, I want to say something": the same conversation listens again
+        if (interruptAnswer()) return
+
         // A trigger must always produce a listening assistant. The user can't see a
         // stuck or half-finished session, so restart it instead of ignoring the gesture.
         val previous = currentSessionJob
@@ -252,6 +267,8 @@ class AssistantForegroundService : Service() {
                 // komutları ise bağlamı korur
                 conversation.clear()
                 currentChatId = resumeChatId
+                lastAnswerCutShort = false
+                bargedInText = null
                 sttOnDevice = false
                 ttsOnDevice = false
                 Net.prefetch(*Net.API_HOSTS)
@@ -288,8 +305,13 @@ class AssistantForegroundService : Service() {
                 while (isActive && turn < MAX_CONVERSATION_TURNS && !sessionEnded) {
                     turn++
                     runCatching { wakeLock?.acquire(180_000L) }
+                    val barged = bargedInText
+                    bargedInText = null
                     val text = if (turn == 1 && !debugPrompt.isNullOrBlank()) {
                         debugPrompt
+                    } else if (barged != null) {
+                        // Said over the last answer: already heard, no new listen
+                        barged
                     } else {
                         startListeningFeedback("Dinliyorum...")
                         transcribe { partial -> overlayUserPartial(partial) }.also { listenEnded(it) }
@@ -353,7 +375,7 @@ class AssistantForegroundService : Service() {
                         break
                     }
                     // Once per release, after the first finished request: what's new
-                    if (WhatsNew.shouldSpeak(this@AssistantForegroundService)) {
+                    if (!lastAnswerCutShort && WhatsNew.shouldSpeak(this@AssistantForegroundService)) {
                         WhatsNew.markSpoken(this@AssistantForegroundService)
                         DiagLog.event("Session", "spoke what's new")
                         speak(WhatsNew.SPOKEN)
@@ -417,7 +439,7 @@ class AssistantForegroundService : Service() {
         val partial: (String) -> Unit = { text -> onPartial?.invoke(text) }
 
         if (metaUsable()) {
-            when (val result = metaStt.listen(partial) { speechEnded() }) {
+            when (val result = metaStt.listen(partial, onSpeechEnd = { speechEnded() })) {
                 is SttResult.Final -> return result.text
                 is SttResult.NoSpeech -> return null
                 is SttResult.Unavailable -> {
@@ -481,7 +503,10 @@ class AssistantForegroundService : Service() {
         try {
             updateNotification("Düşünüyorum...")
             overlayStatus("Düşünüyorum...")
-            conversation.addUserMessage(text)
+            // The model wrote the whole answer, but the user heard only part of it
+            val forModel = if (lastAnswerCutShort) "(Önceki cevabını sesli okurken sözünü kestim.) $text" else text
+            lastAnswerCutShort = false
+            conversation.addUserMessage(forModel)
 
             var streamError: String? = null
             var completedToolCalls: List<AccumulatingToolCall>? = null
@@ -708,8 +733,18 @@ class AssistantForegroundService : Service() {
         val clean = sanitizeForSpeech(question).ifBlank { question.trim() }
         if (PermissionsHelper.hasOverlay(this)) OverlayService.showMessage(this, clean)
         updateNotification(clean.take(120))
+        answerInterrupted = false
         awaitPhrase() // don't talk over a still-playing status phrase
-        speak(clean)
+        val spoken = speakWithBargeIn(clean)
+        // Answered while the question was still being read out
+        spoken.userText?.let { early ->
+            overlayUser(early)
+            if (processing.get()) {
+                VoiceActivity.set(VoiceActivity.Phase.THINKING)
+                startWaitingTone()
+            }
+            return early
+        }
 
         // Reset the main turn's listening flag so listenForPendingAnswer()
         // can acquire it for the clarification prompt.
@@ -774,7 +809,7 @@ class AssistantForegroundService : Service() {
             }
             try {
                 val outcome = if (cloudTtsUsable()) realtimeTts.speak(text) else RealtimeTts.Outcome.FAILED
-                if (outcome == RealtimeTts.Outcome.FAILED && !timedOut.get()) {
+                if (outcome == RealtimeTts.Outcome.FAILED && !timedOut.get() && !answerInterrupted) {
                     if (!ttsOnDevice && cloudTtsUsable()) {
                         ttsOnDevice = true
                         cloudTtsDownUntil = SystemClock.elapsedRealtime() + FALLBACK_HOLD_MS
@@ -806,8 +841,105 @@ class AssistantForegroundService : Service() {
         val clean = sanitizeForSpeech(text).ifBlank { text }
         overlayAssistant(clean)
         currentChatId?.let { id -> runCatching { chatHistory.append(id, "assistant", clean) } }
-        awaitPhrase()
-        speak(clean)
+        answerInterrupted = false
+        answerSpeaking = true
+        val spoken = try {
+            awaitPhrase()
+            speakWithBargeIn(clean)
+        } finally {
+            answerSpeaking = false
+        }
+        if (spoken.cut) {
+            lastAnswerCutShort = true
+            bargedInText = spoken.userText
+            // Don't let the "listening" chime follow the cut-off voice too closely
+            if (spoken.userText == null) delay(INTERRUPT_SETTLE_MS)
+        }
+    }
+
+    private class Spoken(val cut: Boolean, val userText: String?)
+
+    /**
+     * Speaks [text] while the microphone listens for the user talking over it
+     * (barge-in), e.g. "birinciyi aç" while YouTube options are still being read
+     * out. The recognizer's transcripts are compared with [text] so the voice
+     * coming back through the microphone doesn't count ([EchoFilter]). When the
+     * user cuts in, the voice stops and their words become the result.
+     */
+    private suspend fun speakWithBargeIn(text: String): Spoken {
+        try {
+            // Cut (assist gesture) while the status phrase before it still played
+            if (answerInterrupted) return Spoken(true, null)
+            if (!bargeInUsable(text)) {
+                speak(text)
+                return Spoken(answerInterrupted, null)
+            }
+            return coroutineScope {
+                val bargedIn = AtomicBoolean(false)
+                val listener = async {
+                    metaStt.listen(
+                        onPartial = { partial -> overlayUserPartial(partial) },
+                        onSpeechEnd = { speechEnded() },
+                        echo = EchoFilter(text),
+                        onBargeIn = {
+                            bargedIn.set(true)
+                            cutVoice("barge-in")
+                            // The user is already talking: no start chime, but the end chime will play
+                            listenEndPlayed = false
+                            VoiceActivity.set(VoiceActivity.Phase.LISTENING)
+                            overlayStatus("Dinliyorum...")
+                            Haptics.listenStart(this@AssistantForegroundService)
+                        }
+                    )
+                }
+                speak(text)
+                if (!bargedIn.get()) {
+                    listener.cancel()
+                    return@coroutineScope Spoken(answerInterrupted, null)
+                }
+                val heard = (listener.await() as? SttResult.Final)?.text?.takeIf { it.isNotBlank() }
+                if (heard == null) listenEnded(null)
+                Spoken(true, heard)
+            }
+        } finally {
+            // Only this speech may skip the on-device fallback
+            answerInterrupted = false
+        }
+    }
+
+    /** Short answers end before anyone could cut in; Android's recognizer can't run beside the voice. */
+    private fun bargeInUsable(text: String): Boolean =
+        text.length >= BARGE_IN_MIN_CHARS && secureStore.voiceResponseEnabled &&
+            metaUsable() && PermissionsHelper.hasMicrophone(this)
+
+    /**
+     * Cuts the answer being read out with the assist gesture. The session then
+     * listens as after any answer, keeping the conversation. Returns false when
+     * no answer is being spoken.
+     */
+    private fun interruptAnswer(): Boolean {
+        if (!answerSpeaking || currentSessionJob?.isActive != true) return false
+        cutVoice("trigger")
+        return true
+    }
+
+    private fun cutVoice(why: String) {
+        answerInterrupted = true
+        DiagLog.event("Speech", "voice cut by user ($why)")
+        stopVoices()
+        // A stop that lands just before the voice starts its response is reset by it:
+        // stop again once it has started
+        serviceScope.launch {
+            repeat(3) {
+                delay(250)
+                if (answerInterrupted) stopVoices()
+            }
+        }
+    }
+
+    private fun stopVoices() {
+        runCatching { realtimeTts.stop() }
+        runCatching { androidTts.stop() }
     }
 
     // ==================================================================
@@ -870,6 +1002,8 @@ class AssistantForegroundService : Service() {
         listening.set(false)
         processing.set(false)
         sessionActive = false
+        answerSpeaking = false
+        bargedInText = null
         LastPhoto.clear()
         conversation.clear()
         currentChatId = null
@@ -1259,6 +1393,11 @@ class AssistantForegroundService : Service() {
         /** The realtime voice session stays open this long after a session ends. */
         private const val TTS_IDLE_CLOSE_MS = 3 * 60 * 1000L
         private const val PREVIOUS_SESSION_JOIN_MS = 2_000L
+        /** Answers shorter than this are not listened over (barge-in). */
+        private const val BARGE_IN_MIN_CHARS = 60
+
+        /** Pause between a cut-off answer and the "listening" chime. */
+        private const val INTERRUPT_SETTLE_MS = 250L
         private const val WAIT_TONE_FIRST_MS = 700L
         private const val WAIT_TONE_INTERVAL_MS = 2_500L
         private const val WAIT_TONE_VOLUME = 0.5f
